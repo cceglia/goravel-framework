@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/goravel/framework/contracts/config"
 	"github.com/goravel/framework/contracts/database/driver"
@@ -18,22 +19,61 @@ import (
 
 var _ contractsschema.Schema = (*Schema)(nil)
 
+// Option customizes a Schema built by NewSchema.
+type Option func(*Schema)
+
+// WithOrmResolver makes the schema resolve its Orm on every call while it is on the connection
+// it was built for. A nil function means no resolver. The option has no effect on a schema
+// built with a nil Orm or a nil driver.
+func WithOrmResolver(resolve func() contractsorm.Orm) Option {
+	return func(r *Schema) {
+		r.resolveOrm = resolve
+	}
+}
+
+// Schema is safe for concurrent schema operations. Switching the connection of a schema with
+// SetConnection requires exclusive use: no other goroutine may use the schema during a switch.
+// The lock only prevents data races on the connection fields and does not make a multi-call
+// operation atomic. Concurrent migrations on one schema are not supported.
 type Schema struct {
-	config           config.Config
-	driver           driver.Driver
-	grammar          driver.Grammar
-	log              log.Log
+	config config.Config
+	log    log.Log
+
+	// mu guards every field that a connection switch writes: connection, orm, driver,
+	// grammar, processor, prefix and schema. A call copies them under the read lock and
+	// releases it before it runs queries, calls the resolver or calls another schema method.
+	mu         sync.RWMutex
+	connection string
+	driver     driver.Driver
+	grammar    driver.Grammar
+	orm        contractsorm.Orm
+	prefix     string
+	processor  driver.Processor
+	schema     string
+
+	// buildConnection, buildState and resolveOrm are set once when the schema is built.
+	// buildState keeps the driver values of the build connection and has no Orm.
+	buildConnection string
+	buildState      connectionState
+	resolveOrm      func() contractsorm.Orm
+
 	migrations       []contractsschema.Migration
-	orm              contractsorm.Orm
-	prefix           string
-	processor        driver.Processor
-	schema           string
 	goTypes          []contractsschema.GoType
 	models           []any
 	modelsByFullName map[string]any
 }
 
-func NewSchema(config config.Config, log log.Log, orm contractsorm.Orm, driver driver.Driver, migrations []contractsschema.Migration) (*Schema, error) {
+// connectionState is a copy of the fields that a connection switch writes.
+type connectionState struct {
+	orm       contractsorm.Orm
+	driver    driver.Driver
+	grammar   driver.Grammar
+	processor driver.Processor
+	prefix    string
+	schema    string
+}
+
+func NewSchema(config config.Config, log log.Log, orm contractsorm.Orm, driver driver.Driver, migrations []contractsschema.Migration, options ...Option) (*Schema, error) {
 	if driver == nil {
 		return &Schema{
 			config:           config,
@@ -57,7 +97,7 @@ func NewSchema(config config.Config, log log.Log, orm contractsorm.Orm, driver d
 	grammar := driver.Grammar()
 	processor := driver.Processor()
 
-	return &Schema{
+	built := &Schema{
 		config:           config,
 		driver:           driver,
 		grammar:          grammar,
@@ -70,7 +110,51 @@ func NewSchema(config config.Config, log log.Log, orm contractsorm.Orm, driver d
 		goTypes:          defaultGoTypes(),
 		models:           make([]any, 0),
 		modelsByFullName: make(map[string]any),
-	}, nil
+	}
+
+	if orm != nil {
+		for _, option := range options {
+			option(built)
+		}
+
+		if built.resolveOrm != nil {
+			built.buildConnection = orm.Name()
+			built.connection = built.buildConnection
+			built.buildState = connectionState{
+				driver:    driver,
+				grammar:   grammar,
+				processor: processor,
+				prefix:    prefix,
+				schema:    schema,
+			}
+		}
+	}
+
+	return built, nil
+}
+
+// state copies the connection fields under the read lock. In resolver mode, which means a
+// resolver is set and the schema is on its build connection, it resolves the Orm after the
+// lock is released.
+func (r *Schema) state() connectionState {
+	r.mu.RLock()
+	state := connectionState{
+		orm:       r.orm,
+		driver:    r.driver,
+		grammar:   r.grammar,
+		processor: r.processor,
+		prefix:    r.prefix,
+		schema:    r.schema,
+	}
+	resolve := r.resolveOrm
+	resolverMode := resolve != nil && r.connection == r.buildConnection
+	r.mu.RUnlock()
+
+	if resolverMode {
+		state.orm = resolve()
+	}
+
+	return state
 }
 
 func (r *Schema) Connection(name string) contractsschema.Schema {
@@ -107,17 +191,18 @@ func (r *Schema) Drop(table string) error {
 }
 
 func (r *Schema) DropAllTables() error {
-	tables, err := r.GetTables()
+	state := r.state()
+	tables, err := r.tables(state)
 	if err != nil {
 		return err
 	}
 
-	sqls := r.grammar.CompileDropAllTables(r.schema, tables)
+	sqls := state.grammar.CompileDropAllTables(state.schema, tables)
 	if sqls == nil {
 		return nil
 	}
 
-	return r.orm.Transaction(func(tx contractsorm.Query) error {
+	return state.orm.Transaction(func(tx contractsorm.Query) error {
 		for _, sql := range sqls {
 			if _, err := tx.Exec(sql); err != nil {
 				return err
@@ -129,13 +214,14 @@ func (r *Schema) DropAllTables() error {
 }
 
 func (r *Schema) DropAllTypes() error {
-	types, err := r.GetTypes()
+	state := r.state()
+	types, err := r.types(state)
 	if err != nil {
 		return err
 	}
 
-	return r.orm.Transaction(func(tx contractsorm.Query) error {
-		for _, sql := range r.grammar.CompileDropAllTypes(r.schema, types) {
+	return state.orm.Transaction(func(tx contractsorm.Query) error {
+		for _, sql := range state.grammar.CompileDropAllTypes(state.schema, types) {
 			if _, err := tx.Exec(sql); err != nil {
 				return err
 			}
@@ -146,17 +232,18 @@ func (r *Schema) DropAllTypes() error {
 }
 
 func (r *Schema) DropAllViews() error {
-	views, err := r.GetViews()
+	state := r.state()
+	views, err := r.views(state)
 	if err != nil {
 		return err
 	}
 
-	sqls := r.grammar.CompileDropAllViews(r.schema, views)
+	sqls := state.grammar.CompileDropAllViews(state.schema, views)
 	if sqls == nil {
 		return nil
 	}
 
-	return r.orm.Transaction(func(tx contractsorm.Query) error {
+	return state.orm.Transaction(func(tx contractsorm.Query) error {
 		for _, sql := range sqls {
 			if _, err := tx.Exec(sql); err != nil {
 				return err
@@ -211,32 +298,44 @@ func (r *Schema) GetColumnListing(table string) []string {
 }
 
 func (r *Schema) GetColumns(table string) ([]driver.Column, error) {
+	state := r.state()
 	var dbColumns []driver.DBColumn
-	sql, err := r.grammar.CompileColumns(r.schema, table)
+	sql, err := state.grammar.CompileColumns(state.schema, table)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := r.orm.Query().Raw(sql).Scan(&dbColumns); err != nil {
+	if err := state.orm.Query().Raw(sql).Scan(&dbColumns); err != nil {
 		return nil, err
 	}
 
-	return r.processor.ProcessColumns(dbColumns), nil
+	return state.processor.ProcessColumns(dbColumns), nil
 }
 
 func (r *Schema) GetConnection() string {
-	return r.orm.Name()
+	r.mu.RLock()
+	connection := r.connection
+	resolverMode := r.resolveOrm != nil
+	orm := r.orm
+	r.mu.RUnlock()
+
+	if resolverMode {
+		return connection
+	}
+
+	return orm.Name()
 }
 
 func (r *Schema) GetForeignKeys(table string) ([]driver.ForeignKey, error) {
-	table = r.prefix + table
+	state := r.state()
+	table = state.prefix + table
 
 	var dbForeignKeys []driver.DBForeignKey
-	if err := r.orm.Query().Raw(r.grammar.CompileForeignKeys(r.schema, table)).Scan(&dbForeignKeys); err != nil {
+	if err := state.orm.Query().Raw(state.grammar.CompileForeignKeys(state.schema, table)).Scan(&dbForeignKeys); err != nil {
 		return nil, err
 	}
 
-	return r.processor.ProcessForeignKeys(dbForeignKeys), nil
+	return state.processor.ProcessForeignKeys(dbForeignKeys), nil
 }
 
 func (r *Schema) GetIndexListing(table string) []string {
@@ -255,17 +354,18 @@ func (r *Schema) GetIndexListing(table string) []string {
 }
 
 func (r *Schema) GetIndexes(table string) ([]driver.Index, error) {
+	state := r.state()
 	var dbIndexes []driver.DBIndex
-	sql, err := r.grammar.CompileIndexes(r.schema, table)
+	sql, err := state.grammar.CompileIndexes(state.schema, table)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := r.orm.Query().Raw(sql).Scan(&dbIndexes); err != nil {
+	if err := state.orm.Query().Raw(sql).Scan(&dbIndexes); err != nil {
 		return nil, err
 	}
 
-	return r.processor.ProcessIndexes(dbIndexes), nil
+	return state.processor.ProcessIndexes(dbIndexes), nil
 }
 
 // GetModel retrieves a registered model by name. If the name doesn't contain a package
@@ -296,8 +396,12 @@ func (r *Schema) GetTableListing() []string {
 }
 
 func (r *Schema) GetTables() ([]driver.Table, error) {
+	return r.tables(r.state())
+}
+
+func (r *Schema) tables(state connectionState) ([]driver.Table, error) {
 	var tables []driver.Table
-	if err := r.orm.Query().Raw(r.grammar.CompileTables(r.orm.DatabaseName())).Scan(&tables); err != nil {
+	if err := state.orm.Query().Raw(state.grammar.CompileTables(state.orm.DatabaseName())).Scan(&tables); err != nil {
 		return nil, err
 	}
 
@@ -305,17 +409,25 @@ func (r *Schema) GetTables() ([]driver.Table, error) {
 }
 
 func (r *Schema) GetTypes() ([]driver.Type, error) {
+	return r.types(r.state())
+}
+
+func (r *Schema) types(state connectionState) ([]driver.Type, error) {
 	var types []driver.Type
-	if err := r.orm.Query().Raw(r.grammar.CompileTypes()).Scan(&types); err != nil {
+	if err := state.orm.Query().Raw(state.grammar.CompileTypes()).Scan(&types); err != nil {
 		return nil, err
 	}
 
-	return r.processor.ProcessTypes(types), nil
+	return state.processor.ProcessTypes(types), nil
 }
 
 func (r *Schema) GetViews() ([]driver.View, error) {
+	return r.views(r.state())
+}
+
+func (r *Schema) views(state connectionState) ([]driver.View, error) {
 	var views []driver.View
-	if err := r.orm.Query().Raw(r.grammar.CompileViews(r.orm.DatabaseName())).Scan(&views); err != nil {
+	if err := state.orm.Query().Raw(state.grammar.CompileViews(state.orm.DatabaseName())).Scan(&views); err != nil {
 		return nil, err
 	}
 
@@ -348,6 +460,7 @@ func (r *Schema) HasIndex(table, index string) bool {
 }
 
 func (r *Schema) HasTable(name string) bool {
+	state := r.state()
 	var schema string
 	if strings.Contains(name, ".") {
 		lastDotIndex := strings.LastIndex(name, ".")
@@ -355,11 +468,11 @@ func (r *Schema) HasTable(name string) bool {
 		name = name[lastDotIndex+1:]
 	}
 
-	tableName := r.prefix + name
+	tableName := state.prefix + name
 
-	tables, err := r.GetTables()
+	tables, err := r.tables(state)
 	if err != nil {
-		r.log.Errorf(errors.SchemaFailedToGetTables.Args(r.orm.Name(), err).Error())
+		r.log.Errorf(errors.SchemaFailedToGetTables.Args(state.orm.Name(), err).Error())
 		return false
 	}
 
@@ -375,9 +488,10 @@ func (r *Schema) HasTable(name string) bool {
 }
 
 func (r *Schema) HasType(name string) bool {
-	types, err := r.GetTypes()
+	state := r.state()
+	types, err := r.types(state)
 	if err != nil {
-		r.log.Errorf(errors.SchemaFailedToGetTables.Args(r.orm.Name(), err).Error())
+		r.log.Errorf(errors.SchemaFailedToGetTables.Args(state.orm.Name(), err).Error())
 		return false
 	}
 
@@ -391,9 +505,10 @@ func (r *Schema) HasType(name string) bool {
 }
 
 func (r *Schema) HasView(name string) bool {
-	views, err := r.GetViews()
+	state := r.state()
+	views, err := r.views(state)
 	if err != nil {
-		r.log.Errorf(errors.SchemaFailedToGetTables.Args(r.orm.Name(), err).Error())
+		r.log.Errorf(errors.SchemaFailedToGetTables.Args(state.orm.Name(), err).Error())
 		return false
 	}
 
@@ -411,12 +526,13 @@ func (r *Schema) Migrations() []contractsschema.Migration {
 }
 
 func (r *Schema) Orm() contractsorm.Orm {
-	return r.orm
+	return r.state().orm
 }
 
 func (r *Schema) Prune() error {
-	if sql := r.grammar.CompilePrune(r.orm.DatabaseName()); len(sql) > 0 {
-		_, err := r.orm.Query().Exec(sql)
+	state := r.state()
+	if sql := state.grammar.CompilePrune(state.orm.DatabaseName()); len(sql) > 0 {
+		_, err := state.orm.Query().Exec(sql)
 
 		return err
 	}
@@ -450,13 +566,38 @@ func (r *Schema) Rename(from, to string) error {
 	return nil
 }
 
+// SetConnection switches the schema to a connection. In resolver mode, a switch to the build
+// connection restores the values kept at build time and the resolver mode. A switch to any other
+// connection derives a new Orm from the Orm resolved at that moment and keeps it until the next
+// switch. If the schema stays switched when Orm.Fresh closes the pool of its derived Orm, the
+// caller must switch the schema again before using it.
 func (r *Schema) SetConnection(name string) {
-	schema, err := r.newConnection(name)
+	connection := r.connectionName(name)
+	if r.resolveOrm != nil && connection == r.buildConnection {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+
+		r.connection = r.buildConnection
+		r.driver = r.buildState.driver
+		r.grammar = r.buildState.grammar
+		r.orm = nil
+		r.prefix = r.buildState.prefix
+		r.processor = r.buildState.processor
+		r.schema = r.buildState.schema
+
+		return
+	}
+
+	schema, err := r.newConnection(connection)
 	if err != nil {
 		r.log.Panic(errors.SchemaConnectionNotFound.Args(name).SetModule(errors.ModuleSchedule).Error())
 		return
 	}
 
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.connection = connection
 	r.driver = schema.driver
 	r.grammar = schema.grammar
 	r.orm = schema.orm
@@ -472,7 +613,7 @@ func (r *Schema) newConnection(name string) (*Schema, error) {
 		return nil, err
 	}
 
-	schema, err := NewSchema(r.config, r.log, r.orm.Connection(connection), connectionDriver, r.migrations)
+	schema, err := NewSchema(r.config, r.log, r.currentOrm().Connection(connection), connectionDriver, r.migrations)
 	if err != nil {
 		return nil, err
 	}
@@ -483,6 +624,17 @@ func (r *Schema) newConnection(name string) (*Schema, error) {
 	maps.Copy(schema.modelsByFullName, r.modelsByFullName)
 
 	return schema, nil
+}
+
+// currentOrm returns the Orm that a new connection derives from. With a resolver it is the Orm
+// resolved now, also when the schema is switched, so a switch after Orm.Fresh does not derive
+// from a closed pool. Without a resolver it is the Orm of the schema.
+func (r *Schema) currentOrm() contractsorm.Orm {
+	if r.resolveOrm != nil {
+		return r.resolveOrm()
+	}
+
+	return r.state().orm
 }
 
 func (r *Schema) connectionName(name string) string {
@@ -503,7 +655,8 @@ func (r *Schema) driverForConnection(name string) (driver.Driver, error) {
 }
 
 func (r *Schema) Sql(sql string) error {
-	_, err := r.orm.Query().Exec(sql)
+	state := r.state()
+	_, err := state.orm.Query().Exec(sql)
 
 	return err
 }
@@ -520,17 +673,19 @@ func (r *Schema) Table(table string, callback func(table contractsschema.Bluepri
 }
 
 func (r *Schema) build(blueprint contractsschema.Blueprint) error {
-	if r.orm.Query().InTransaction() {
-		return blueprint.Build(r.orm.Query(), r.grammar)
+	state := r.state()
+	if state.orm.Query().InTransaction() {
+		return blueprint.Build(state.orm.Query(), state.grammar)
 	}
 
-	return r.orm.Transaction(func(tx contractsorm.Query) error {
-		return blueprint.Build(tx, r.grammar)
+	return state.orm.Transaction(func(tx contractsorm.Query) error {
+		return blueprint.Build(tx, state.grammar)
 	})
 }
 
 func (r *Schema) createBlueprint(table string) contractsschema.Blueprint {
-	return NewBlueprint(r, r.prefix, table)
+	state := r.state()
+	return NewBlueprint(r, state.prefix, table)
 }
 
 // extendGoTypes merges user-provided GoType overrides and additions into the schema's default mappings.

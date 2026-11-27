@@ -14,25 +14,27 @@ type TestCase struct {
 }
 
 func (r *TestCase) Http(t testing.TestingT) contractshttp.Request {
-	return http.NewTestRequest(t, json, routeFacade, sessionFacade)
+	return http.NewTestRequest(t, json, makeRoute(), makeSession())
 }
 
 func (r *TestCase) Seed(seeders ...contractsseeder.Seeder) {
-	if artisanFacade == nil {
+	artisan := makeArtisan()
+	if artisan == nil {
 		panic(errors.ConsoleFacadeNotSet.SetModule(errors.ModuleTesting))
 	}
 
-	if err := artisanFacade.Call("--no-ansi db:seed" + getCommandOptionOfSeeders(seeders)); err != nil {
+	if err := artisan.Call("--no-ansi db:seed" + getCommandOptionOfSeeders(seeders)); err != nil {
 		panic(err)
 	}
 }
 
 func (r *TestCase) RefreshDatabase(seeders ...contractsseeder.Seeder) {
-	if artisanFacade == nil {
+	artisan := makeArtisan()
+	if artisan == nil {
 		panic(errors.ConsoleFacadeNotSet.SetModule(errors.ModuleTesting))
 	}
 
-	if err := artisanFacade.Call("--no-ansi migrate:refresh" + getCommandOptionOfSeeders(seeders)); err != nil {
+	if err := artisan.Call("--no-ansi migrate:refresh" + getCommandOptionOfSeeders(seeders)); err != nil {
 		panic(err)
 	}
 }

@@ -35,30 +35,43 @@ import (
 	"github.com/goravel/framework/contracts/console"
 	contractsdatabase "github.com/goravel/framework/contracts/database"
 	contractsdriver "github.com/goravel/framework/contracts/database/driver"
+	contractsorm "github.com/goravel/framework/contracts/database/orm"
 	"github.com/goravel/framework/contracts/database/schema"
 	"github.com/goravel/framework/contracts/database/seeder"
 	"github.com/goravel/framework/contracts/event"
 	"github.com/goravel/framework/contracts/foundation"
 	contractshttp "github.com/goravel/framework/contracts/http"
+	contractsnotification "github.com/goravel/framework/contracts/notification"
 	"github.com/goravel/framework/contracts/queue"
 	"github.com/goravel/framework/contracts/schedule"
 	"github.com/goravel/framework/contracts/validation"
 	"github.com/goravel/framework/database"
 	databasedb "github.com/goravel/framework/database/db"
+	databasedriver "github.com/goravel/framework/database/driver"
+	databaseorm "github.com/goravel/framework/database/orm"
 	databaseschema "github.com/goravel/framework/database/schema"
+	frameworkerrors "github.com/goravel/framework/errors"
 	consolepkg "github.com/goravel/framework/foundation/console"
 	foundationjson "github.com/goravel/framework/foundation/json"
 	mocksconfig "github.com/goravel/framework/mocks/config"
 	mocksconsole "github.com/goravel/framework/mocks/console"
 	mocksdriver "github.com/goravel/framework/mocks/database/driver"
+	mocksorm "github.com/goravel/framework/mocks/database/orm"
 	mocksfoundation "github.com/goravel/framework/mocks/foundation"
 	mockslog "github.com/goravel/framework/mocks/log"
+	mocksmail "github.com/goravel/framework/mocks/mail"
+	mocksqueue "github.com/goravel/framework/mocks/queue"
 	mocksroute "github.com/goravel/framework/mocks/route"
+	mocksdocker "github.com/goravel/framework/mocks/testing/docker"
 	mocksview "github.com/goravel/framework/mocks/view"
+	"github.com/goravel/framework/notification"
+	"github.com/goravel/framework/notification/channels"
+	frameworkqueue "github.com/goravel/framework/queue"
 	"github.com/goravel/framework/support"
 	"github.com/goravel/framework/support/color"
 	"github.com/goravel/framework/support/pluralizer"
 	"github.com/goravel/framework/telemetry"
+	frameworktesting "github.com/goravel/framework/testing"
 )
 
 type ApplicationTestSuite struct {
@@ -2179,6 +2192,28 @@ func (freshStubDialector) Initialize(db *gorm.DB) error {
 	return nil
 }
 
+// newOrmFreshApp registers the real database provider on the test application. The connection
+// driver is a stub, and the returned flag makes its callback fail while it is true.
+func (s *ApplicationTestSuite) newOrmFreshApp() (failConnection *bool) {
+	previousApp := App
+	s.T().Cleanup(func() {
+		App = previousApp
+		databasedriver.CloseConnections()
+	})
+
+	s.SetupTest()
+	s.T().Cleanup(s.cancel)
+
+	config := frameworkconfig.NewApplication(filepath.Join(s.T().TempDir(), ".env"))
+	failConnection = s.addStubDatabaseConfig(config)
+	s.app.Instance(binding.Config, config)
+	s.app.Instance(binding.Log, mockslog.NewLog(s.T()))
+
+	(&database.ServiceProvider{}).Register(s.app)
+
+	return failConnection
+}
+
 // addStubDatabaseConfig makes the default connection use the stub driver. The returned flag makes
 // the driver factory fail while it is true.
 func (s *ApplicationTestSuite) addStubDatabaseConfig(config contractsconfig.Config) (failConnection *bool) {
@@ -2200,4 +2235,517 @@ func (s *ApplicationTestSuite) addStubDatabaseConfig(config contractsconfig.Conf
 	})
 
 	return failConnection
+}
+
+func (s *ApplicationTestSuite) cachedInstance(key string) (any, bool) {
+	return s.app.instances.Load(key)
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_CachesNewInstances() {
+	s.newOrmFreshApp()
+
+	oldOrm := s.app.MakeOrm()
+	oldDB := s.app.MakeDB()
+	s.NotNil(oldOrm)
+	s.NotNil(oldDB)
+	oldPool, err := oldOrm.DB()
+	s.NoError(err)
+
+	oldOrm.Fresh()
+
+	newOrm, ormCached := s.cachedInstance(binding.Orm)
+	newDB, dbCached := s.cachedInstance(binding.DB)
+	s.True(ormCached, "the new Orm must be cached when Fresh returns")
+	s.True(dbCached, "the new DB must be cached when Fresh returns")
+	s.NotSame(oldOrm, newOrm)
+	s.NotSame(oldDB, newDB)
+	s.ErrorContains(oldPool.Ping(), "database is closed")
+	s.Same(newOrm, s.app.MakeOrm())
+	s.Same(newDB, s.app.MakeDB())
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_FactoryFailure() {
+	s.newOrmFreshApp()
+
+	oldOrm := s.app.MakeOrm()
+	s.NotNil(oldOrm)
+	s.NotNil(s.app.MakeDB())
+
+	// A missing log facade makes both factories return an error.
+	s.app.Bind(binding.Log, func(foundation.Application) (any, error) { return nil, assert.AnError })
+	s.app.Fresh(binding.Log)
+
+	s.NotPanics(oldOrm.Fresh)
+
+	_, ormCached := s.cachedInstance(binding.Orm)
+	_, dbCached := s.cachedInstance(binding.DB)
+	s.False(ormCached)
+	s.False(dbCached)
+
+	// The next resolution runs the factory again.
+	s.app.Instance(binding.Log, mockslog.NewLog(s.T()))
+	s.app.Fresh(binding.Log)
+
+	s.NotNil(s.app.MakeOrm())
+	s.NotNil(s.app.MakeDB())
+	_, ormCached = s.cachedInstance(binding.Orm)
+	_, dbCached = s.cachedInstance(binding.DB)
+	s.True(ormCached)
+	s.True(dbCached)
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_ConnectionFailure() {
+	failConnection := s.newOrmFreshApp()
+
+	oldOrm := s.app.MakeOrm()
+	s.NotNil(oldOrm)
+	s.NotNil(s.app.MakeDB())
+
+	*failConnection = true
+	oldOrm.Fresh()
+
+	failedOrm, ormCached := s.cachedInstance(binding.Orm)
+	failedDB, dbCached := s.cachedInstance(binding.DB)
+	s.True(ormCached)
+	s.True(dbCached)
+	s.NotSame(oldOrm, failedOrm)
+	s.NotNil(failedOrm)
+	s.Nil(failedDB, "the query builder factory caches nil on a connection error")
+	s.Nil(failedOrm.(*databaseorm.Orm).Query(), "the Orm has no working query")
+
+	// The failed values stay after the configuration works again.
+	*failConnection = false
+	s.Same(failedOrm, s.app.MakeOrm())
+	s.Nil(s.app.MakeDB())
+
+	// The next Orm.Fresh is the retry point.
+	s.app.MakeOrm().Fresh()
+
+	s.NotSame(failedOrm, s.app.MakeOrm())
+	s.NotNil(s.app.MakeOrm().Query())
+	s.NotNil(s.app.MakeDB())
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_SchemaFollowsNewOrm() {
+	s.newOrmFreshApp()
+
+	schema := s.app.MakeSchema()
+	oldOrm := s.app.MakeOrm()
+	s.Same(oldOrm, schema.Orm())
+
+	oldOrm.Fresh()
+
+	newOrm := s.app.MakeOrm()
+	s.NotSame(oldOrm, newOrm)
+	s.Same(newOrm, schema.Orm())
+	s.Same(schema, s.app.MakeSchema(), "the schema singleton is not forgotten")
+	s.Equal("primary", schema.GetConnection())
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_SchemaTransactionQueryStaysVisible() {
+	s.newOrmFreshApp()
+
+	schema := s.app.MakeSchema()
+	s.app.MakeOrm().Fresh()
+
+	transaction := mocksorm.NewQuery(s.T())
+	schema.Orm().SetQuery(transaction)
+
+	s.Same(transaction, schema.Orm().Query())
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_SchemaBuiltWithoutOrmStaysWithoutOrm() {
+	s.newOrmFreshApp()
+	s.app.MakeConfig().(*frameworkconfig.Application).Add("database.default", "")
+
+	schema := s.app.MakeSchema()
+	s.Nil(schema.Orm())
+
+	s.app.MakeConfig().(*frameworkconfig.Application).Add("database.default", "primary")
+	s.app.Fresh(binding.Orm, binding.DB)
+	s.NotNil(s.app.MakeOrm())
+
+	s.Nil(schema.Orm(), "a schema built without an Orm never becomes valid later")
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_TestingSingletonUsesNewOrm() {
+	s.newOrmFreshApp()
+	s.app.Instance(binding.Artisan, mocksconsole.NewArtisan(s.T()))
+	(&frameworktesting.ServiceProvider{}).Register(s.app)
+
+	testing := s.app.MakeTesting()
+	s.NotNil(testing)
+	oldOrm := s.app.MakeOrm()
+
+	oldOrm.Fresh()
+
+	// The Orm that the testing singleton must use is the one that the container holds now.
+	databaseDocker := mocksdocker.NewDatabaseDriver(s.T())
+	databaseDocker.EXPECT().Ready().Return(nil).Once()
+	driver := mocksdriver.NewDriver(s.T())
+	driver.EXPECT().Docker().Return(databaseDocker, nil).Once()
+	s.app.MakeConfig().(*frameworkconfig.Application).Add("database.connections.primary.via", func() (contractsdriver.Driver, error) {
+		return driver, nil
+	})
+	newOrm := mocksorm.NewOrm(s.T())
+	newOrm.EXPECT().Fresh().Once()
+	s.app.Fresh(binding.Orm)
+	s.app.Instance(binding.Orm, newOrm)
+
+	database, err := testing.Docker().Database()
+	s.Require().NoError(err)
+
+	s.NoError(database.Ready())
+	s.Same(testing, s.app.MakeTesting(), "the testing singleton is not forgotten")
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_NotificationDatabaseChannelUsesNewOrm() {
+	s.newOrmFreshApp()
+	s.app.Instance(binding.Mail, mocksmail.NewMail(s.T()))
+	s.app.Instance(binding.Queue, mocksqueue.NewQueue(s.T()))
+	(&notification.ServiceProvider{}).Register(s.app)
+
+	manager := s.app.MakeNotification()
+	s.Require().NotNil(manager)
+	channel, ok := manager.Channel(contractsnotification.ChannelDatabase).(*channels.DatabaseChannel)
+	s.Require().True(ok)
+	oldOrm := s.app.MakeOrm()
+	payload := []byte(`{"id":"1","type":"t","notifiable_type":"n","connection":"","data":{}}`)
+
+	oldOrm.Fresh()
+
+	newQuery := mocksorm.NewQuery(s.T())
+	newQuery.EXPECT().Create(mock.AnythingOfType("*channels.DatabaseNotificationModel")).Return(nil).Once()
+	newOrm := mocksorm.NewOrm(s.T())
+	newOrm.EXPECT().Query().Return(newQuery).Once()
+	s.app.Fresh(binding.Orm)
+	s.app.Instance(binding.Orm, newOrm)
+
+	s.NoError(channel.Deliver("42", payload))
+	s.Same(manager, s.app.MakeNotification(), "the notification manager is not forgotten")
+
+	// A resolved nil Orm returns an error instead of panicking.
+	s.app.Bind(binding.Orm, func(foundation.Application) (any, error) { return nil, nil })
+	s.app.Fresh(binding.Orm)
+
+	s.Equal(frameworkerrors.OrmFacadeNotSet.SetModule(frameworkerrors.ModuleNotification), channel.Deliver("42", payload))
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_QueueBuiltWithoutDBGetsRebuiltDB() {
+	s.newOrmFreshApp()
+	config := s.app.MakeConfig().(*frameworkconfig.Application)
+	config.Add("queue.default", "jobs")
+	config.Add("queue.connections.jobs.driver", "database")
+	config.Add("queue.connections.jobs.connection", "primary")
+	s.app.SetJson(foundationjson.New())
+	oldOrm := s.app.MakeOrm()
+	s.Require().NotNil(s.app.MakeDB())
+
+	// The queue is built while the query builder resolves to nil.
+	config.Add("database.default", "")
+	s.app.Fresh(binding.DB)
+	s.Nil(s.app.MakeDB())
+	(&frameworkqueue.ServiceProvider{}).Register(s.app)
+	q := s.app.MakeQueue()
+	s.Require().NotNil(q)
+
+	invalidConnection := frameworkerrors.QueueInvalidDatabaseConnection.Args("jobs")
+	_, err := q.Connection("jobs")
+	s.Equal(invalidConnection, err)
+	s.Equal(invalidConnection, q.Job(&queueTestJob{}).Dispatch())
+	s.Equal(invalidConnection, q.Chain([]queue.ChainJob{{Job: &queueTestJob{}}}).Dispatch())
+
+	// The configuration becomes valid and Orm.Fresh rebuilds the query builder. The rebuilt
+	// connection records the statements that it executes.
+	statements := &freshStatements{}
+	recordingGrammar := mocksdriver.NewGrammar(s.T())
+	recordingGrammar.EXPECT().CompilePlaceholderFormat().Return(nil).Maybe()
+	recordingDriver := mocksdriver.NewDriver(s.T())
+	recordingDriver.EXPECT().Pool().Return(contractsdatabase.Pool{
+		Writers: []contractsdatabase.Config{{Driver: "postgres", Database: "app", Dialector: freshRecordingDialector{statements: statements}}},
+	}).Maybe()
+	recordingDriver.EXPECT().Grammar().Return(recordingGrammar).Maybe()
+	recordingDriver.EXPECT().Processor().Return(nil).Maybe()
+	config.Add("database.connections.primary.via", func() (contractsdriver.Driver, error) {
+		return recordingDriver, nil
+	})
+	config.Add("database.default", "primary")
+	oldOrm.Fresh()
+
+	driver, err := q.Connection("jobs")
+	s.Require().NoError(err)
+	s.Equal("database", driver.Driver())
+	s.Same(q, s.app.MakeQueue(), "the queue singleton is not forgotten")
+	s.Empty(statements.all(), "nothing runs before the first dispatch")
+
+	// Dispatch reaches the rebuilt query builder: each dispatch inserts one job through it.
+	// Before the rebuild, dispatch returned the invalid connection error instead.
+	s.NoError(q.Job(&queueTestJob{}).Dispatch())
+	s.Require().Len(statements.all(), 1)
+	s.Contains(statements.all()[0], "INSERT INTO jobs")
+
+	s.NoError(q.Chain([]queue.ChainJob{{Job: &queueTestJob{}}}).Dispatch())
+	s.Require().Len(statements.all(), 2)
+	s.Contains(statements.all()[1], "INSERT INTO jobs")
+}
+
+// freshStatements records the statements that a recording connection executes.
+type freshStatements struct {
+	mu   sync.Mutex
+	list []string
+}
+
+func (s *freshStatements) add(statement string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.list = append(s.list, statement)
+}
+
+func (s *freshStatements) all() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return slices.Clone(s.list)
+}
+
+// freshRecordingConnector opens connections that record the statements they execute.
+type freshRecordingConnector struct {
+	statements *freshStatements
+}
+
+func (c freshRecordingConnector) Connect(context.Context) (sqldriver.Conn, error) {
+	return freshRecordingConn(c), nil
+}
+func (c freshRecordingConnector) Driver() sqldriver.Driver { return freshStubDriver{} }
+
+type freshRecordingConn struct {
+	statements *freshStatements
+}
+
+func (freshRecordingConn) Prepare(string) (sqldriver.Stmt, error) { return nil, sqldriver.ErrBadConn }
+func (freshRecordingConn) Close() error                           { return nil }
+func (freshRecordingConn) Begin() (sqldriver.Tx, error)           { return freshTx{}, nil }
+func (c freshRecordingConn) ExecContext(_ context.Context, query string, _ []sqldriver.NamedValue) (sqldriver.Result, error) {
+	c.statements.add(query)
+
+	return sqldriver.RowsAffected(1), nil
+}
+
+type freshRecordingDialector struct {
+	gormtests.DummyDialector
+	statements *freshStatements
+}
+
+func (d freshRecordingDialector) Initialize(db *gorm.DB) error {
+	if err := (gormtests.DummyDialector{}).Initialize(db); err != nil {
+		return err
+	}
+
+	db.ConnPool = sql.OpenDB(freshRecordingConnector{statements: d.statements})
+
+	return nil
+}
+
+type queueTestJob struct{}
+
+func (queueTestJob) Signature() string   { return "queue-test-job" }
+func (queueTestJob) Handle(...any) error { return nil }
+
+// freshTxConnector opens connections that accept transactions and count them.
+type freshTxConnector struct {
+	begins *atomic.Int32
+}
+
+func (c freshTxConnector) Connect(context.Context) (sqldriver.Conn, error) {
+	return freshTxConn(c), nil
+}
+func (c freshTxConnector) Driver() sqldriver.Driver { return freshStubDriver{} }
+
+type freshTxConn struct {
+	begins *atomic.Int32
+}
+
+func (freshTxConn) Prepare(string) (sqldriver.Stmt, error) { return nil, sqldriver.ErrBadConn }
+func (freshTxConn) Close() error                           { return nil }
+func (c freshTxConn) Begin() (sqldriver.Tx, error) {
+	c.begins.Add(1)
+
+	return freshTx{}, nil
+}
+
+type freshTx struct{}
+
+func (freshTx) Commit() error   { return nil }
+func (freshTx) Rollback() error { return nil }
+
+type freshTxDialector struct {
+	gormtests.DummyDialector
+	begins *atomic.Int32
+}
+
+func (d freshTxDialector) Initialize(db *gorm.DB) error {
+	if err := (gormtests.DummyDialector{}).Initialize(db); err != nil {
+		return err
+	}
+
+	db.ConnPool = sql.OpenDB(freshTxConnector{begins: d.begins})
+
+	return nil
+}
+
+// addAnalyticsConnection adds a second connection whose transactions are counted.
+func (s *ApplicationTestSuite) addAnalyticsConnection() (begins *atomic.Int32) {
+	begins = new(atomic.Int32)
+	driver := mocksdriver.NewDriver(s.T())
+	driver.EXPECT().Pool().Return(contractsdatabase.Pool{
+		Writers: []contractsdatabase.Config{{Driver: "postgres", Database: "analytics", Prefix: "a_", Schema: "reporting", Dialector: freshTxDialector{begins: begins}}},
+	}).Maybe()
+	driver.EXPECT().Grammar().Return(nil).Maybe()
+	driver.EXPECT().Processor().Return(nil).Maybe()
+
+	s.app.MakeConfig().(*frameworkconfig.Application).Add("database.connections.analytics.via", func() (contractsdriver.Driver, error) {
+		return driver, nil
+	})
+
+	return begins
+}
+
+// runMigrationProtocol follows the steps of the migrator for one migration on a connection:
+// switch, run the transaction on the Orm of the schema, and switch back.
+func runMigrationProtocol(s schema.Schema, connection string, up func(tx contractsorm.Query) error) error {
+	previousConnection := s.GetConnection()
+	previousQuery := s.Orm().Query()
+	s.SetConnection(connection)
+
+	defer func() {
+		s.Orm().SetQuery(previousQuery)
+		s.SetConnection(previousConnection)
+	}()
+
+	return s.Orm().Transaction(func(tx contractsorm.Query) error {
+		s.Orm().SetQuery(tx)
+
+		return up(tx)
+	})
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_SchemaSwitchDerivesFromCurrentOrm() {
+	s.newOrmFreshApp()
+	s.addAnalyticsConnection()
+
+	schema := s.app.MakeSchema()
+	schema.SetConnection("analytics")
+	stale := schema.Orm()
+	s.Equal("analytics", stale.Name())
+	stalePool, err := stale.DB()
+	s.Require().NoError(err)
+	s.NoError(stalePool.Ping())
+
+	s.app.MakeOrm().Fresh()
+
+	// A new switch derives a new Orm from the current instance, not from the closed one.
+	schema.SetConnection("analytics")
+	derived := schema.Orm()
+	s.NotSame(stale, derived)
+	s.Equal("analytics", derived.Name())
+	s.Same(derived, schema.Orm(), "the derived Orm is stable until the next switch")
+	derivedPool, err := derived.DB()
+	s.Require().NoError(err)
+	s.NoError(derivedPool.Ping())
+	s.ErrorContains(stalePool.Ping(), "database is closed")
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_SchemaTransactionQueryStaysVisibleOnSwitchedConnection() {
+	s.newOrmFreshApp()
+	s.addAnalyticsConnection()
+
+	schema := s.app.MakeSchema()
+	schema.SetConnection("analytics")
+
+	transaction := mocksorm.NewQuery(s.T())
+	schema.Orm().SetQuery(transaction)
+
+	s.Same(transaction, schema.Orm().Query())
+	s.NotSame(transaction, s.app.MakeOrm().Query(), "the build Orm keeps its own query")
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_ConsecutiveMigrationsUseTheirConnectionQuery() {
+	s.newOrmFreshApp()
+	begins := s.addAnalyticsConnection()
+
+	schema := s.app.MakeSchema()
+	defaultQuery := s.app.MakeOrm().Query()
+	var transactions []contractsorm.Query
+	var orms []contractsorm.Orm
+
+	for range 2 {
+		err := runMigrationProtocol(schema, "analytics", func(tx contractsorm.Query) error {
+			transactions = append(transactions, tx)
+			orms = append(orms, schema.Orm())
+			s.Same(tx, schema.Orm().Query(), "the transaction query is visible during the migration")
+
+			return nil
+		})
+		s.NoError(err, "the transaction runs on the analytics query, not on the default query")
+	}
+
+	s.Equal(int32(2), begins.Load())
+	s.Len(transactions, 2)
+	s.NotSame(orms[0], orms[1], "a later migration never reuses the derived Orm")
+	s.Equal("primary", schema.GetConnection())
+	s.Same(s.app.MakeOrm(), schema.Orm())
+	s.Same(defaultQuery, schema.Orm().Query())
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_SchemaSwitchBackRestoresResolverMode() {
+	s.newOrmFreshApp()
+	s.addAnalyticsConnection()
+
+	schema := s.app.MakeSchema()
+	schema.SetConnection("analytics")
+	s.Equal("analytics", schema.GetConnection())
+
+	schema.SetConnection("primary")
+	s.Equal("primary", schema.GetConnection())
+	s.Same(s.app.MakeOrm(), schema.Orm())
+
+	s.app.MakeOrm().Fresh()
+
+	s.Same(s.app.MakeOrm(), schema.Orm(), "the schema resolves the new Orm again")
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_NamedConnectionSchemaKeepsFixedOrm() {
+	s.newOrmFreshApp()
+	s.addAnalyticsConnection()
+
+	named := s.app.MakeSchema().Connection("analytics")
+	fixed := named.Orm()
+	s.Equal("analytics", named.GetConnection())
+
+	s.app.MakeOrm().Fresh()
+
+	s.Same(fixed, named.Orm())
+	s.Equal("analytics", named.GetConnection())
+}
+
+func (s *ApplicationTestSuite) TestOrmFresh_SchemaLeftSwitchedNeedsASwitch() {
+	s.newOrmFreshApp()
+	s.addAnalyticsConnection()
+
+	schema := s.app.MakeSchema()
+	schema.SetConnection("analytics")
+	derived := schema.Orm()
+	derivedPool, err := derived.DB()
+	s.Require().NoError(err)
+
+	s.app.MakeOrm().Fresh()
+
+	s.Same(derived, schema.Orm(), "a switched schema keeps its derived Orm")
+	s.ErrorContains(derivedPool.Ping(), "database is closed")
+
+	schema.SetConnection("primary")
+
+	s.Same(s.app.MakeOrm(), schema.Orm())
+	s.Equal("primary", schema.GetConnection())
 }

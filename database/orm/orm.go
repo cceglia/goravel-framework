@@ -192,11 +192,16 @@ func (r *Orm) SetQuery(query contractsorm.Query) {
 	r.query = query
 }
 
-// TODO: The fresh logic needs to be optimized, it's a bit unclear now.
-// https://github.com/goravel/goravel/issues/848
+// Fresh closes the cached connections and their pools, then calls the fresh callback with
+// the Orm and DB bindings so that the callback forgets them. Pools of connections with
+// several writers or readers beyond the main pool stay open.
+//
+// Fresh is a test setup operation. Call it from a single goroutine while no other goroutine
+// resolves or uses the Orm, the database query builder, or their connections. Do not use
+// references resolved before the call afterwards, because their pools are closed.
 func (r *Orm) Fresh() {
-	r.fresh(binding.Orm)
-	driver.ResetConnections()
+	driver.CloseConnections()
+	r.fresh(binding.Orm, binding.DB)
 }
 
 func (r *Orm) Transaction(txFunc func(tx contractsorm.Query) error) (err error) {

@@ -11,11 +11,40 @@ import (
 )
 
 var (
-	json          foundation.Json
-	artisanFacade contractsconsole.Artisan
-	routeFacade   contractsroute.Route
-	sessionFacade contractsession.Manager
+	json foundation.Json
+
+	registeredApp foundation.Application
 )
+
+// makeArtisan resolves the artisan facade from the application, and returns nil
+// when the provider never registered.
+func makeArtisan() contractsconsole.Artisan {
+	if registeredApp == nil {
+		return nil
+	}
+
+	return registeredApp.MakeArtisan()
+}
+
+// makeRoute resolves the route facade from the application, and returns nil
+// when the provider never registered.
+func makeRoute() contractsroute.Route {
+	if registeredApp == nil {
+		return nil
+	}
+
+	return registeredApp.MakeRoute()
+}
+
+// makeSession resolves the session facade from the application, and returns nil
+// when the provider never registered.
+func makeSession() contractsession.Manager {
+	if registeredApp == nil {
+		return nil
+	}
+
+	return registeredApp.MakeSession()
+}
 
 type ServiceProvider struct {
 }
@@ -31,6 +60,8 @@ func (r *ServiceProvider) Relationship() binding.Relationship {
 }
 
 func (r *ServiceProvider) Register(app foundation.Application) {
+	registeredApp = app
+
 	app.Singleton(binding.Testing, func(app foundation.Application) (any, error) {
 		config := app.MakeConfig()
 		if config == nil {
@@ -43,23 +74,26 @@ func (r *ServiceProvider) Register(app foundation.Application) {
 		orm := app.MakeOrm()
 		process := app.MakeProcess()
 
-		return NewApplication(artisan, cache, config, orm, process), nil
+		var options []Option
+		if orm != nil {
+			options = append(options, WithOrmResolver(app.MakeOrm))
+		}
+
+		return NewApplication(artisan, cache, config, orm, process, options...), nil
 	})
 }
 
 func (r *ServiceProvider) Boot(app foundation.Application) {
-	artisanFacade = app.MakeArtisan()
-	if artisanFacade == nil {
+	// The facades are resolved here only to print a message for a missing one.
+	if app.MakeArtisan() == nil {
 		color.Errorln(errors.ConsoleFacadeNotSet.SetModule(errors.ModuleTesting))
 	}
 
-	routeFacade = app.MakeRoute()
-	if routeFacade == nil {
+	if app.MakeRoute() == nil {
 		color.Errorln(errors.RouteFacadeNotSet.SetModule(errors.ModuleTesting))
 	}
 
-	sessionFacade = app.MakeSession()
-	if sessionFacade == nil {
+	if app.MakeSession() == nil {
 		color.Errorln(errors.SessionFacadeNotSet.SetModule(errors.ModuleTesting))
 	}
 

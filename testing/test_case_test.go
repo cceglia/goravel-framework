@@ -1,12 +1,18 @@
 package testing
 
 import (
+	"io"
+	nethttp "net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
 	mocksconsole "github.com/goravel/framework/mocks/console"
+	mocksroute "github.com/goravel/framework/mocks/route"
+	mockssession "github.com/goravel/framework/mocks/session"
 )
 
 type TestCaseSuite struct {
@@ -23,7 +29,31 @@ func TestTestCaseSuite(t *testing.T) {
 func (s *TestCaseSuite) SetupTest() {
 	s.mockArtisan = mocksconsole.NewArtisan(s.T())
 	s.testCase = &TestCase{}
-	artisanFacade = s.mockArtisan
+	useApplication(s.T()).EXPECT().MakeArtisan().Return(s.mockArtisan).Maybe()
+}
+
+func (s *TestCaseSuite) TestHttp() {
+	mockRoute := mocksroute.NewRoute(s.T())
+	mockSession := mockssession.NewManager(s.T())
+	mockApp := useApplication(s.T())
+	mockApp.EXPECT().MakeRoute().Return(mockRoute).Once()
+	mockApp.EXPECT().MakeSession().Return(mockSession).Once()
+
+	var gotRequest *nethttp.Request
+	mockRoute.EXPECT().Test(mock.Anything).RunAndReturn(func(request *nethttp.Request) (*nethttp.Response, error) {
+		gotRequest = request
+
+		return &nethttp.Response{StatusCode: nethttp.StatusOK, Body: io.NopCloser(strings.NewReader("pong"))}, nil
+	}).Once()
+
+	response, err := s.testCase.Http(s.T()).Get("/ping")
+
+	s.Require().NoError(err)
+	s.Equal(nethttp.MethodGet, gotRequest.Method)
+	s.Equal("/ping", gotRequest.URL.Path)
+	content, err := response.Content()
+	s.Require().NoError(err)
+	s.Equal("pong", content)
 }
 
 func (s *TestCaseSuite) TestSeed() {

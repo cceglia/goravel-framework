@@ -11,10 +11,15 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
+	contractsdatabase "github.com/goravel/framework/contracts/database"
+	contractsdriver "github.com/goravel/framework/contracts/database/driver"
 	"github.com/goravel/framework/contracts/database/migration"
 	"github.com/goravel/framework/contracts/database/orm"
 	contractsschema "github.com/goravel/framework/contracts/database/schema"
+	databaseschema "github.com/goravel/framework/database/schema"
+	mocksconfig "github.com/goravel/framework/mocks/config"
 	mocksconsole "github.com/goravel/framework/mocks/console"
+	mocksdriver "github.com/goravel/framework/mocks/database/driver"
 	mocksmigration "github.com/goravel/framework/mocks/database/migration"
 	mocksorm "github.com/goravel/framework/mocks/database/orm"
 	mocksschema "github.com/goravel/framework/mocks/database/schema"
@@ -857,6 +862,83 @@ func (s *MigratorSuite) mockRunUp(
 
 		return f(mockQuery)
 	}).Once()
+}
+
+// recordingConnectionMigration records the Orm that the schema returns while its Up runs.
+type recordingConnectionMigration struct {
+	schema    contractsschema.Schema
+	signature string
+	ups       []orm.Orm
+}
+
+func (r *recordingConnectionMigration) Signature() string  { return r.signature }
+func (r *recordingConnectionMigration) Connection() string { return "analytics" }
+func (r *recordingConnectionMigration) Up() error {
+	r.ups = append(r.ups, r.schema.Orm())
+
+	return nil
+}
+func (r *recordingConnectionMigration) Down() error { return nil }
+
+func (s *MigratorSuite) TestRunUp_ResolverSchemaSwitchesPerMigration() {
+	mockConfig := mocksconfig.NewConfig(s.T())
+	buildOrm := mocksorm.NewOrm(s.T())
+	buildDriver := mocksdriver.NewDriver(s.T())
+	defaultQuery := mocksorm.NewQuery(s.T())
+
+	buildOrm.EXPECT().Name().Return("primary").Once()
+	buildDriver.EXPECT().Pool().Return(contractsdatabase.Pool{Writers: []contractsdatabase.Config{{}}}).Once()
+	buildDriver.EXPECT().Grammar().Return(nil).Once()
+	buildDriver.EXPECT().Processor().Return(nil).Once()
+
+	schema, err := databaseschema.NewSchema(mockConfig, nil, buildOrm, buildDriver, nil, databaseschema.WithOrmResolver(func() orm.Orm {
+		return buildOrm
+	}))
+	s.Require().NoError(err)
+
+	migrator := &Migrator{repository: s.mockRepository, schema: schema}
+	migrations := []*recordingConnectionMigration{
+		{schema: schema, signature: "first"},
+		{schema: schema, signature: "second"},
+	}
+
+	derivedOrms := make([]*mocksorm.Orm, len(migrations))
+	for i, migration := range migrations {
+		analyticsDriver := mocksdriver.NewDriver(s.T())
+		analyticsDriver.EXPECT().Pool().Return(contractsdatabase.Pool{Writers: []contractsdatabase.Config{{}}}).Once()
+		analyticsDriver.EXPECT().Grammar().Return(nil).Once()
+		analyticsDriver.EXPECT().Processor().Return(nil).Once()
+		mockConfig.EXPECT().Get("database.connections.analytics.via").Return(func() (contractsdriver.Driver, error) {
+			return analyticsDriver, nil
+		}).Once()
+
+		transactionQuery := mocksorm.NewQuery(s.T())
+		derived := mocksorm.NewOrm(s.T())
+		derived.EXPECT().Transaction(mock.Anything).RunAndReturn(func(f func(tx orm.Query) error) error {
+			return f(transactionQuery)
+		}).Once()
+		derived.EXPECT().SetQuery(transactionQuery).Once()
+		derived.EXPECT().SetQuery(defaultQuery).Once()
+		buildOrm.EXPECT().Connection("analytics").Return(derived).Once()
+
+		derivedOrms[i] = derived
+		s.mockRepository.EXPECT().Log(migration.signature, 7).Return(nil).Once()
+	}
+
+	buildOrm.EXPECT().Query().Return(defaultQuery).Times(2)
+	buildOrm.EXPECT().SetQuery(defaultQuery).Times(2)
+
+	for _, migration := range migrations {
+		s.NoError(migrator.runUp(migration, 7))
+		s.Equal("primary", schema.GetConnection())
+		s.Same(buildOrm, schema.Orm(), "the schema is back in resolver mode")
+	}
+
+	// Each migration ran on the Orm derived for its own switch, which also held its transaction.
+	s.Require().Len(migrations[0].ups, 1)
+	s.Require().Len(migrations[1].ups, 1)
+	s.Same(derivedOrms[0], migrations[0].ups[0])
+	s.Same(derivedOrms[1], migrations[1].ups[0])
 }
 
 type TestMigration struct {

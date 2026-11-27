@@ -25,7 +25,12 @@ type Orm interface {
 	Observe(model any, observer Observer)
 	// Query gets a new query builder instance.
 	Query() Query
-	// Fresh resets the Orm instance.
+	// Fresh closes the cached connections and their pools, then resets the Orm and the
+	// database query builder instances.
+	//
+	// Fresh is a test setup operation. Call it from a single goroutine while no other goroutine
+	// resolves or uses the Orm, the database query builder, or their connections. Do not use
+	// references resolved before the call afterwards, because their pools are closed.
 	Fresh()
 	// SetQuery sets the query builder instance.
 	SetQuery(query Query)

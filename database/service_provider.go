@@ -63,7 +63,7 @@ func (r *ServiceProvider) Register(app foundation.Application) {
 			return nil, nil
 		}
 
-		orm, err := databaseorm.BuildOrm(ctx, config, connection, log, app.Fresh, telemetryResolver)
+		orm, err := databaseorm.BuildOrm(ctx, config, connection, log, rebuildFrom(app), telemetryResolver)
 		if err != nil {
 			color.Warningln(errors.OrmInitConnection.Args(connection, err).SetModule(errors.ModuleOrm))
 
@@ -128,7 +128,7 @@ func (r *ServiceProvider) Register(app foundation.Application) {
 			return nil, err
 		}
 
-		return databaseschema.NewSchema(config, log, orm, driver, nil)
+		return databaseschema.NewSchema(config, log, orm, driver, nil, databaseschema.WithOrmResolver(app.MakeOrm))
 	})
 	app.Singleton(contractsbinding.Seeder, func(app foundation.Application) (any, error) {
 		return databaseseeder.NewSeederFacade(), nil
@@ -170,6 +170,17 @@ func (r *ServiceProvider) registerCommands(app foundation.Application) {
 			console.NewShowCommand(config, schema),
 			console.NewWipeCommand(config, schema),
 		})
+	}
+}
+
+// rebuildFrom returns a callback that forgets the given cached instances and then
+// resolves the Orm and the database query builder again, so both are cached before
+// any consumer resolves them.
+func rebuildFrom(app foundation.Application) func(key ...any) {
+	return func(key ...any) {
+		app.Fresh(key...)
+		app.MakeOrm()
+		app.MakeDB()
 	}
 }
 
