@@ -4,6 +4,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc/stats"
 
+	contractstelemetry "github.com/goravel/framework/contracts/telemetry"
 	"github.com/goravel/framework/errors"
 	"github.com/goravel/framework/support/color"
 	"github.com/goravel/framework/telemetry"
@@ -11,7 +12,8 @@ import (
 
 // NewServerStatsHandler creates an OTel stats handler for the server.
 func NewServerStatsHandler(opts ...Option) stats.Handler {
-	if telemetry.Facade == nil {
+	facade := telemetry.MakeTelemetry()
+	if facade == nil {
 		color.Warningln(errors.TelemetryGrpcServerStatsHandlerDisabled.Error())
 		return nil
 	}
@@ -20,14 +22,15 @@ func NewServerStatsHandler(opts ...Option) stats.Handler {
 		return nil
 	}
 
-	finalOpts := append(getCommonOptions(), opts...)
+	finalOpts := append(getCommonOptions(facade), opts...)
 
 	return otelgrpc.NewServerHandler(finalOpts...)
 }
 
 // NewClientStatsHandler creates an OTel stats handler for the client.
 func NewClientStatsHandler(opts ...Option) stats.Handler {
-	if telemetry.Facade == nil {
+	facade := telemetry.MakeTelemetry()
+	if facade == nil {
 		color.Warningln(errors.TelemetryGrpcClientStatsHandlerDisabled.Error())
 		return nil
 	}
@@ -36,16 +39,16 @@ func NewClientStatsHandler(opts ...Option) stats.Handler {
 		return nil
 	}
 
-	finalOpts := append(getCommonOptions(), opts...)
+	finalOpts := append(getCommonOptions(facade), opts...)
 
 	return otelgrpc.NewClientHandler(finalOpts...)
 }
 
-func getCommonOptions() []otelgrpc.Option {
+func getCommonOptions(facade contractstelemetry.Telemetry) []otelgrpc.Option {
 	return []otelgrpc.Option{
-		otelgrpc.WithTracerProvider(telemetry.Facade.TracerProvider()),
-		otelgrpc.WithMeterProvider(telemetry.Facade.MeterProvider()),
-		otelgrpc.WithPropagators(telemetry.Facade.Propagator()),
+		otelgrpc.WithTracerProvider(facade.TracerProvider()),
+		otelgrpc.WithMeterProvider(facade.MeterProvider()),
+		otelgrpc.WithPropagators(facade.Propagator()),
 		otelgrpc.WithMessageEvents(otelgrpc.ReceivedEvents, otelgrpc.SentEvents),
 	}
 }

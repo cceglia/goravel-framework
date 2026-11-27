@@ -131,6 +131,8 @@ func TestStorageDisk_PanicOnInvalidDisk(t *testing.T) {
 
 func TestServiceProvider(t *testing.T) {
 	provider := &ServiceProvider{}
+	originApp := registeredApp
+	t.Cleanup(func() { registeredApp = originApp })
 
 	t.Run("relationship", func(t *testing.T) {
 		relationship := provider.Relationship()
@@ -194,5 +196,61 @@ func TestServiceProvider(t *testing.T) {
 
 		assert.Same(t, config, ConfigFacade)
 		assert.Same(t, storage, StorageFacade)
+	})
+}
+
+func TestStorageFacadeAccessor(t *testing.T) {
+	restore := func(t *testing.T) {
+		originApp := registeredApp
+		originStorageFacade := StorageFacade
+		t.Cleanup(func() {
+			registeredApp = originApp
+			StorageFacade = originStorageFacade
+		})
+	}
+
+	t.Run("returns the exported variable first", func(t *testing.T) {
+		restore(t)
+
+		storage := mocksfilesystem.NewStorage(t)
+		registeredApp = nil
+		StorageFacade = storage
+
+		assert.Same(t, storage, storageFacade())
+	})
+
+	t.Run("returns nil when the provider never registered", func(t *testing.T) {
+		restore(t)
+
+		registeredApp = nil
+		StorageFacade = nil
+
+		assert.Nil(t, storageFacade())
+	})
+
+	t.Run("resolves from the application", func(t *testing.T) {
+		restore(t)
+
+		storage := mocksfilesystem.NewStorage(t)
+		mockApp := mocksfoundation.NewApplication(t)
+		mockApp.EXPECT().MakeStorage().Return(storage).Once()
+		registeredApp = mockApp
+		StorageFacade = nil
+
+		assert.Same(t, storage, storageFacade())
+	})
+}
+
+func TestServiceProvider_FlushState(t *testing.T) {
+	provider := &ServiceProvider{}
+	origin := StorageFacade
+	t.Cleanup(func() { StorageFacade = origin })
+
+	StorageFacade = mocksfilesystem.NewStorage(t)
+	provider.FlushState(mocksfoundation.NewApplication(t))
+	assert.Nil(t, StorageFacade)
+
+	assert.NotPanics(t, func() {
+		provider.FlushState(mocksfoundation.NewApplication(t))
 	})
 }

@@ -38,7 +38,7 @@ func NewFile(file string) (*File, error) {
 		disk:    ConfigFacade.GetString("filesystems.default"),
 		path:    file,
 		name:    filepath.Base(file),
-		storage: StorageFacade,
+		storage: storageFacade(),
 	}, nil
 }
 
@@ -78,7 +78,7 @@ func NewFileFromRequest(fileHeader *multipart.FileHeader) (*File, error) {
 		disk:    ConfigFacade.GetString("filesystems.default"),
 		path:    tempFile.Name(),
 		name:    fileHeader.Filename,
-		storage: StorageFacade,
+		storage: storageFacade(),
 	}, nil
 }
 

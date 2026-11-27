@@ -28,6 +28,8 @@ func TestSessionServiceProviderRelationship(t *testing.T) {
 
 func TestSessionServiceProviderRegister(t *testing.T) {
 	provider := &ServiceProvider{}
+	originApp := registeredApp
+	t.Cleanup(func() { registeredApp = originApp })
 	app := mocksfoundation.NewApplication(t)
 
 	var callback func(contractsfoundation.Application) (any, error)
@@ -102,4 +104,60 @@ func TestSessionServiceProviderBoot(t *testing.T) {
 
 	assert.Same(t, session, SessionFacade)
 	assert.Same(t, config, ConfigFacade)
+}
+
+func TestMakeSession(t *testing.T) {
+	restore := func(t *testing.T) {
+		originApp := registeredApp
+		originSessionFacade := SessionFacade
+		t.Cleanup(func() {
+			registeredApp = originApp
+			SessionFacade = originSessionFacade
+		})
+	}
+
+	t.Run("returns the exported variable first", func(t *testing.T) {
+		restore(t)
+
+		manager := mockssession.NewManager(t)
+		registeredApp = nil
+		SessionFacade = manager
+
+		assert.Same(t, manager, MakeSession())
+	})
+
+	t.Run("returns nil when the provider never registered", func(t *testing.T) {
+		restore(t)
+
+		registeredApp = nil
+		SessionFacade = nil
+
+		assert.Nil(t, MakeSession())
+	})
+
+	t.Run("resolves from the application", func(t *testing.T) {
+		restore(t)
+
+		manager := mockssession.NewManager(t)
+		mockApp := mocksfoundation.NewApplication(t)
+		mockApp.EXPECT().MakeSession().Return(manager).Once()
+		registeredApp = mockApp
+		SessionFacade = nil
+
+		assert.Same(t, manager, MakeSession())
+	})
+}
+
+func TestSessionServiceProviderFlushState(t *testing.T) {
+	provider := &ServiceProvider{}
+	origin := SessionFacade
+	t.Cleanup(func() { SessionFacade = origin })
+
+	SessionFacade = mockssession.NewManager(t)
+	provider.FlushState(mocksfoundation.NewApplication(t))
+	assert.Nil(t, SessionFacade)
+
+	assert.NotPanics(t, func() {
+		provider.FlushState(mocksfoundation.NewApplication(t))
+	})
 }

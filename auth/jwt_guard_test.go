@@ -47,7 +47,7 @@ func (s *JwtGuardTestSuite) SetupTest() {
 	s.mockLog = mockslog.NewLog(s.T())
 	s.mockUserProvider = mocksauth.NewUserProvider(s.T())
 
-	cacheFacade = s.mockCache
+	useFacades(s.T(), s.mockCache, nil)
 	configFacade = s.mockConfig
 
 	s.mockConfig.EXPECT().GetString("auth.guards.user.secret").Return("a").Once()
@@ -539,7 +539,7 @@ func (s *JwtGuardTestSuite) TestEmptySecret() {
 func (s *JwtGuardTestSuite) TestCacheFacadeNotSet() {
 	testAdminGuard := "admin"
 
-	cacheFacade = nil
+	useFacades(s.T(), nil, nil)
 
 	_, err := NewJwtGuard(s.mockContext, testAdminGuard, s.mockUserProvider)
 	s.Assert().ErrorIs(errors.CacheFacadeNotSet, err)

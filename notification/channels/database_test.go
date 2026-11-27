@@ -8,7 +8,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
+	contractsorm "github.com/goravel/framework/contracts/database/orm"
 	contractsnotification "github.com/goravel/framework/contracts/notification"
+	frameworkerrors "github.com/goravel/framework/errors"
 	mocksorm "github.com/goravel/framework/mocks/database/orm"
 	"github.com/goravel/framework/notification/channels"
 )
@@ -328,4 +330,70 @@ func TestDatabaseChannel_Deliver_ReturnsError_WhenMalformedPayload(t *testing.T)
 	err := ch.Deliver("1", []byte(`{not valid json`))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to unmarshal")
+}
+
+// ---- ORM resolver ----
+
+func expectCreate(t *testing.T) *mocksorm.Orm {
+	t.Helper()
+
+	query := mocksorm.NewQuery(t)
+	query.EXPECT().Create(mock.AnythingOfType("*channels.DatabaseNotificationModel")).Return(nil).Once()
+
+	o := mocksorm.NewOrm(t)
+	o.EXPECT().Query().Return(query).Once()
+
+	return o
+}
+
+func TestDatabaseChannel_Send_ResolvesOrmPerUse(t *testing.T) {
+	buildOrm := mocksorm.NewOrm(t) // no call expected: the resolver takes over
+	firstOrm := expectCreate(t)
+	secondOrm := expectCreate(t)
+	current := contractsorm.Orm(firstOrm)
+
+	ch := channels.NewDatabaseChannel(buildOrm, channels.WithDatabaseOrmResolver(func() contractsorm.Orm {
+		return current
+	}))
+
+	assert.NoError(t, ch.Send(&dbNotifiable{id: "42"}, &richDbNotification{}))
+
+	current = secondOrm
+
+	assert.NoError(t, ch.Send(&dbNotifiable{id: "42"}, &richDbNotification{}))
+}
+
+func TestDatabaseChannel_Deliver_Orm(t *testing.T) {
+	tests := []struct {
+		name        string
+		newChannel  func(t *testing.T) *channels.DatabaseChannel
+		expectError error
+	}{
+		{
+			name: "a nil resolver function is treated as no resolver",
+			newChannel: func(t *testing.T) *channels.DatabaseChannel {
+				return channels.NewDatabaseChannel(expectCreate(t), channels.WithDatabaseOrmResolver(nil))
+			},
+		},
+		{
+			name: "a resolver that returns nil returns the Orm facade error",
+			newChannel: func(t *testing.T) *channels.DatabaseChannel {
+				return channels.NewDatabaseChannel(
+					mocksorm.NewOrm(t),
+					channels.WithDatabaseOrmResolver(func() contractsorm.Orm { return nil }),
+				)
+			},
+			expectError: frameworkerrors.OrmFacadeNotSet.SetModule(frameworkerrors.ModuleNotification),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ch := tt.newChannel(t)
+
+			err := ch.Send(&dbNotifiable{id: "42"}, &richDbNotification{})
+
+			assert.Equal(t, tt.expectError, err)
+		})
+	}
 }

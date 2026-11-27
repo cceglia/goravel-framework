@@ -44,7 +44,7 @@ func (s *HandlerTestSuite) TestServerStatsHandler() {
 		{
 			name: "returns nil and logs warning when telemetry facade is nil",
 			setup: func() {
-				telemetry.Facade = nil
+				telemetry.Facade = nil //nolint:staticcheck // The handler still honors the deprecated variable.
 			},
 			assert: func() {
 				var handler stats.Handler
@@ -86,7 +86,7 @@ func (s *HandlerTestSuite) TestServerStatsHandler() {
 
 	for _, test := range tests {
 		s.Run(test.name, func() {
-			telemetry.Facade = s.mockTelemetry
+			telemetry.Facade = s.mockTelemetry //nolint:staticcheck // The handler still honors the deprecated variable.
 			telemetry.ConfigFacade = s.mockConfig
 			test.setup()
 			test.assert()
@@ -103,7 +103,7 @@ func (s *HandlerTestSuite) TestClientStatsHandler() {
 		{
 			name: "returns nil and logs warning when telemetry facade is nil",
 			setup: func() {
-				telemetry.Facade = nil
+				telemetry.Facade = nil //nolint:staticcheck // The handler still honors the deprecated variable.
 			},
 			assert: func() {
 				var handler stats.Handler
@@ -144,7 +144,7 @@ func (s *HandlerTestSuite) TestClientStatsHandler() {
 
 	for _, test := range tests {
 		s.Run(test.name, func() {
-			telemetry.Facade = s.mockTelemetry
+			telemetry.Facade = s.mockTelemetry //nolint:staticcheck // The handler still honors the deprecated variable.
 			telemetry.ConfigFacade = s.mockConfig
 			test.setup()
 			test.assert()

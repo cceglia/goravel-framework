@@ -47,7 +47,7 @@ func TestStartSession(t *testing.T) {
 	mockConfig.EXPECT().GetString("session.files").Return(path.Storage("framework/sessions")).Once()
 	mockConfig.EXPECT().GetString("session.cookie").Return("goravel_session").Once()
 
-	session.SessionFacade = session.NewManager(mockConfig, json.New())
+	session.SessionFacade = session.NewManager(mockConfig, json.New()) //nolint:staticcheck // The middleware still honors the deprecated variable.
 	server := httptest.NewServer(testHttpSessionMiddleware(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		switch r.URL.Path {
 		case "/add":

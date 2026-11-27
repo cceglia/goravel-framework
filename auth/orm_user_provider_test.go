@@ -29,7 +29,7 @@ func (s *OrmUserProviderTestSuite) SetupTest() {
 	s.mockOrm = mocksorm.NewOrm(s.T())
 	s.mockDB = mocksorm.NewQuery(s.T())
 
-	ormFacade = s.mockOrm
+	useFacades(s.T(), nil, s.mockOrm)
 
 	provider, err := NewOrmUserProvider(s.mockContext)
 	s.Require().Nil(err)
@@ -37,7 +37,7 @@ func (s *OrmUserProviderTestSuite) SetupTest() {
 }
 
 func (s *OrmUserProviderTestSuite) TestNewOrmUserProvider_WithNilOrmFacade() {
-	ormFacade = nil
+	useFacades(s.T(), nil, nil)
 	provider, err := NewOrmUserProvider(s.mockContext)
 	s.Nil(provider)
 	s.ErrorIs(err, errors.OrmFacadeNotSet)

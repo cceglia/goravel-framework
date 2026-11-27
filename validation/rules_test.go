@@ -3861,11 +3861,7 @@ func TestDBRulesTestSuite(t *testing.T) {
 func (s *DBRulesTestSuite) SetupTest() {
 	s.mockOrm = mocksorm.NewOrm(s.T())
 	s.mockQuery = mocksorm.NewQuery(s.T())
-	ormFacade = s.mockOrm
-}
-
-func (s *DBRulesTestSuite) TearDownTest() {
-	ormFacade = nil
+	useOrmFacade(s.T(), s.mockOrm)
 }
 
 // --- exists rule tests ---
@@ -3971,7 +3967,7 @@ func (s *DBRulesTestSuite) TestRuleExists_ConnectionTable() {
 }
 
 func (s *DBRulesTestSuite) TestRuleExists_OrmNil() {
-	ormFacade = nil
+	useOrmFacade(s.T(), nil)
 
 	ctx := &RuleContext{
 		Ctx:        context.Background(),
@@ -4128,7 +4124,7 @@ func (s *DBRulesTestSuite) TestRuleUnique_ConnectionTable() {
 }
 
 func (s *DBRulesTestSuite) TestRuleUnique_OrmNil() {
-	ormFacade = nil
+	useOrmFacade(s.T(), nil)
 
 	ctx := &RuleContext{
 		Ctx:        context.Background(),

@@ -138,7 +138,7 @@ func (s *MiddlewareTestSuite) TestTelemetry() {
 
 	for _, tt := range tests {
 		s.Run(tt.name, func() {
-			telemetry.Facade = s.mockTelemetry
+			telemetry.Facade = s.mockTelemetry //nolint:staticcheck // The middleware still honors the deprecated variable.
 			telemetry.ConfigFacade = s.mockConfig
 
 			tt.setup()

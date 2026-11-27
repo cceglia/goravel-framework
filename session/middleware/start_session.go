@@ -20,14 +20,16 @@ func (s *startSessionMiddleware) Handle(ctx http.Context) {
 		return
 	}
 
-	driver, err := session.SessionFacade.Driver()
+	manager := session.MakeSession()
+
+	driver, err := manager.Driver()
 	if err != nil {
 		color.Errorln(err)
 		req.Next()
 		return
 	}
 
-	sess, err := session.SessionFacade.BuildSession(driver)
+	sess, err := manager.BuildSession(driver)
 	if err != nil {
 		color.Errorln(err)
 		req.Next()
@@ -47,7 +49,7 @@ func (s *startSessionMiddleware) Handle(ctx http.Context) {
 		color.Errorf("Error saving session: %s\n", err)
 	}
 
-	session.SessionFacade.ReleaseSession(sess)
+	manager.ReleaseSession(sess)
 }
 
 func StartSession() http.Middleware {

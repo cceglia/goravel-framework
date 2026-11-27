@@ -63,7 +63,6 @@ func (s *SessionGuardTestSuite) SetupTest() {
 
 	s.mockContext = mockContext
 
-	cacheFacade = s.mockCache
 	configFacade = s.mockConfig
 
 	s.originConfigFacade = session.ConfigFacade

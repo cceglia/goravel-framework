@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	contractsqueue "github.com/goravel/framework/contracts/queue"
+	mocksdb "github.com/goravel/framework/mocks/database/db"
 	mocksqueue "github.com/goravel/framework/mocks/queue"
 )
 
@@ -51,4 +52,20 @@ func (s *ApplicationTestSuite) TestWorkerUsesConfiguredQueueListForSelectedConne
 
 	s.Equal("high,default", worker.queue)
 	s.Equal(3, worker.concurrent)
+}
+
+func (s *ApplicationTestSuite) TestFailerReadsFailedJobsFromConfiguredTable() {
+	mockDB := mocksdb.NewDB(s.T())
+	mockQuery := mocksdb.NewQuery(s.T())
+	s.mockConfig.EXPECT().GetString("queue.failed.database").Return("mysql").Once()
+	s.mockConfig.EXPECT().GetString("queue.failed.table").Return("failed_jobs").Once()
+	mockDB.EXPECT().Connection("mysql").Return(mockDB).Once()
+	mockDB.EXPECT().Table("failed_jobs").Return(mockQuery).Once()
+
+	app := NewApplication(s.mockConfig, nil, mockDB, nil, nil, nil)
+	failer, ok := app.Failer().(*Failer)
+
+	s.Require().True(ok)
+	s.Same(mockQuery, failer.query)
+	s.Same(app, failer.queue)
 }

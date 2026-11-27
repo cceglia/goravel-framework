@@ -28,11 +28,28 @@ type DatabaseNotificationModel struct {
 func (DatabaseNotificationModel) TableName() string { return "notifications" }
 
 type DatabaseChannel struct {
-	orm orm.Orm
+	orm        orm.Orm
+	resolveOrm func() orm.Orm
 }
 
-func NewDatabaseChannel(o orm.Orm) *DatabaseChannel {
-	return &DatabaseChannel{orm: o}
+// DatabaseOption configures a DatabaseChannel.
+type DatabaseOption func(*DatabaseChannel)
+
+// WithDatabaseOrmResolver makes the channel resolve its Orm on every delivery, instead of using
+// the Orm it was built with. A nil resolve function is ignored.
+func WithDatabaseOrmResolver(resolve func() orm.Orm) DatabaseOption {
+	return func(c *DatabaseChannel) {
+		c.resolveOrm = resolve
+	}
+}
+
+func NewDatabaseChannel(o orm.Orm, options ...DatabaseOption) *DatabaseChannel {
+	channel := &DatabaseChannel{orm: o}
+	for _, option := range options {
+		option(channel)
+	}
+
+	return channel
 }
 
 func (c *DatabaseChannel) Name() string { return contractsnotification.ChannelDatabase }
@@ -139,6 +156,12 @@ func (c *DatabaseChannel) Deliver(route string, payload []byte) error {
 	}
 
 	o := c.orm
+	if c.resolveOrm != nil {
+		o = c.resolveOrm()
+		if o == nil {
+			return errors.OrmFacadeNotSet.SetModule(errors.ModuleNotification)
+		}
+	}
 	if record.Connection != "" {
 		o = o.Connection(record.Connection)
 	}

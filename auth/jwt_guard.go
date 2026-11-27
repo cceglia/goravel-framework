@@ -49,6 +49,7 @@ func NewJwtGuard(ctx http.Context, name string, userProvider contractsauth.UserP
 	if ctx == nil {
 		return nil, errors.InvalidHttpContext.SetModule(errors.ModuleAuth)
 	}
+	cacheFacade := makeCache()
 	if cacheFacade == nil {
 		return nil, errors.CacheFacadeNotSet.SetModule(errors.ModuleAuth)
 	}

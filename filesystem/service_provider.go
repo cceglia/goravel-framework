@@ -9,9 +9,32 @@ import (
 )
 
 var (
-	ConfigFacade  configcontract.Config
+	ConfigFacade configcontract.Config
+
+	// StorageFacade is the storage facade assigned during Boot.
+	//
+	// Deprecated: Use App().MakeStorage() instead.
 	StorageFacade filesystemcontract.Storage
+
+	registeredApp foundation.Application
 )
+
+var _ foundation.ServiceProviderWithFlushState = (*ServiceProvider)(nil)
+
+// storageFacade returns the exported variable when it is set, so a mock keeps
+// working. Otherwise it resolves the storage facade from the application, and
+// returns nil when the provider never registered.
+func storageFacade() filesystemcontract.Storage {
+	if StorageFacade != nil {
+		return StorageFacade
+	}
+
+	if registeredApp == nil {
+		return nil
+	}
+
+	return registeredApp.MakeStorage()
+}
 
 type ServiceProvider struct {
 }
@@ -27,6 +50,8 @@ func (r *ServiceProvider) Relationship() binding.Relationship {
 }
 
 func (r *ServiceProvider) Register(app foundation.Application) {
+	registeredApp = app
+
 	app.Singleton(binding.Storage, func(app foundation.Application) (any, error) {
 		config := app.MakeConfig()
 		if config == nil {
@@ -40,4 +65,9 @@ func (r *ServiceProvider) Register(app foundation.Application) {
 func (r *ServiceProvider) Boot(app foundation.Application) {
 	ConfigFacade = app.MakeConfig()
 	StorageFacade = app.MakeStorage()
+}
+
+// FlushState clears the deprecated storage facade variable. Boot assigns it again.
+func (r *ServiceProvider) FlushState(foundation.Application) {
+	StorageFacade = nil
 }

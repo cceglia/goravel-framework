@@ -17,10 +17,31 @@ import (
 )
 
 var (
-	cacheFacade  cache.Cache
 	configFacade config.Config
-	ormFacade    orm.Orm
+
+	registeredApp foundation.Application
 )
+
+// makeCache resolves the cache facade from the application, and returns nil
+// when the provider never registered.
+func makeCache() cache.Cache {
+	if registeredApp == nil {
+		return nil
+	}
+
+	return registeredApp.MakeCache()
+}
+
+// makeOrm resolves the ORM facade from the application, and returns nil when
+// the provider never registered. A guard or user provider keeps the facade it
+// resolves for its own lifetime, so a caller must not keep one across Orm.Fresh.
+func makeOrm() orm.Orm {
+	if registeredApp == nil {
+		return nil
+	}
+
+	return registeredApp.MakeOrm()
+}
 
 type ServiceProvider struct {
 }
@@ -39,6 +60,8 @@ func (r *ServiceProvider) Relationship() contractsbinding.Relationship {
 }
 
 func (r *ServiceProvider) Register(app foundation.Application) {
+	registeredApp = app
+
 	app.BindWith(contractsbinding.Auth, func(app foundation.Application, parameters map[string]any) (any, error) {
 		configFacade = app.MakeConfig()
 		if configFacade == nil {
@@ -64,8 +87,8 @@ func (r *ServiceProvider) Register(app foundation.Application) {
 }
 
 func (r *ServiceProvider) Boot(app foundation.Application) {
-	cacheFacade = app.MakeCache()
-	ormFacade = app.MakeOrm()
+	// Resolving the ORM builds it at boot, so its connection warning keeps its timing.
+	_ = app.MakeOrm()
 
 	r.registerCommands(app)
 }

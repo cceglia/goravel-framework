@@ -1775,6 +1775,7 @@ func ruleEncoding(ctx *RuleContext) bool {
 //   - table: required, supports "connection.table" format
 //   - columns: optional, defaults to the current field name. Multiple columns are joined with OR.
 func ruleExists(ctx *RuleContext) bool {
+	ormFacade := makeOrm()
 	if ormFacade == nil || len(ctx.Parameters) == 0 {
 		return false
 	}
@@ -1831,6 +1832,7 @@ func ruleExists(ctx *RuleContext) bool {
 //   - idColumn: optional, defaults to "id", the column to use for the except clause
 //   - except values: optional, values to exclude from the unique check (for update scenarios)
 func ruleUnique(ctx *RuleContext) bool {
+	ormFacade := makeOrm()
 	if ormFacade == nil || len(ctx.Parameters) == 0 {
 		return false
 	}

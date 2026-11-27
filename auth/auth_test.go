@@ -38,9 +38,8 @@ func (s *AuthTestSuite) SetupTest() {
 	s.mockDB = mocksorm.NewQuery(s.T())
 	s.mockLog = mockslog.NewLog(s.T())
 
-	cacheFacade = s.mockCache
+	useFacades(s.T(), s.mockCache, s.mockOrm)
 	configFacade = s.mockConfig
-	ormFacade = s.mockOrm
 
 	s.mockConfig.EXPECT().GetString("auth.defaults.guard").Return("user").Once()
 

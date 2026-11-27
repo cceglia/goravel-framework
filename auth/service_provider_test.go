@@ -8,15 +8,17 @@ import (
 
 	contractsauthaccess "github.com/goravel/framework/contracts/auth/access"
 	contractsbinding "github.com/goravel/framework/contracts/binding"
+	cachecontract "github.com/goravel/framework/contracts/cache"
 	contractsconsole "github.com/goravel/framework/contracts/console"
+	ormcontract "github.com/goravel/framework/contracts/database/orm"
 	contractsfoundation "github.com/goravel/framework/contracts/foundation"
 	frameworkerrors "github.com/goravel/framework/errors"
 	mockscache "github.com/goravel/framework/mocks/cache"
 	mocksconfig "github.com/goravel/framework/mocks/config"
+	mocksorm "github.com/goravel/framework/mocks/database/orm"
 	mocksfoundation "github.com/goravel/framework/mocks/foundation"
 	mockshttp "github.com/goravel/framework/mocks/http"
 	mockslog "github.com/goravel/framework/mocks/log"
-	mocksorm "github.com/goravel/framework/mocks/database/orm"
 	mockssession "github.com/goravel/framework/mocks/session"
 	"github.com/goravel/framework/support/binding"
 )
@@ -36,18 +38,24 @@ func TestAuthServiceProviderRelationship(t *testing.T) {
 
 func TestAuthServiceProviderRegister(t *testing.T) {
 	provider := &ServiceProvider{}
-	app := mocksfoundation.NewApplication(t)
+	application := mocksfoundation.NewApplication(t)
 
 	var authCallback func(contractsfoundation.Application, map[string]any) (any, error)
 	var gateCallback func(contractsfoundation.Application) (any, error)
-	app.EXPECT().BindWith(contractsbinding.Auth, mock.AnythingOfType("func(foundation.Application, map[string]interface {}) (interface {}, error)")).Run(func(_ any, callback func(contractsfoundation.Application, map[string]any) (any, error)) {
+	application.EXPECT().BindWith(contractsbinding.Auth, mock.AnythingOfType("func(foundation.Application, map[string]interface {}) (interface {}, error)")).Run(func(_ any, callback func(contractsfoundation.Application, map[string]any) (any, error)) {
 		authCallback = callback
 	}).Once()
-	app.EXPECT().Singleton(contractsbinding.Gate, mock.AnythingOfType("func(foundation.Application) (interface {}, error)")).Run(func(_ any, callback func(contractsfoundation.Application) (any, error)) {
+	application.EXPECT().Singleton(contractsbinding.Gate, mock.AnythingOfType("func(foundation.Application) (interface {}, error)")).Run(func(_ any, callback func(contractsfoundation.Application) (any, error)) {
 		gateCallback = callback
 	}).Once()
 
-	provider.Register(app)
+	previousApp := registeredApp
+	t.Cleanup(func() {
+		registeredApp = previousApp
+	})
+
+	provider.Register(application)
+	assert.Same(t, application, registeredApp)
 	assert.NotNil(t, authCallback)
 	assert.NotNil(t, gateCallback)
 
@@ -96,11 +104,7 @@ func TestAuthServiceProviderRegister(t *testing.T) {
 		ctx := mockshttp.NewContext(t)
 		request := mockshttp.NewContextRequest(t)
 		session := mockssession.NewSession(t)
-		originOrmFacade := ormFacade
-		ormFacade = mocksorm.NewOrm(t)
-		t.Cleanup(func() {
-			ormFacade = originOrmFacade
-		})
+		useFacades(t, nil, mocksorm.NewOrm(t))
 
 		callbackApp.EXPECT().MakeConfig().Return(config).Once()
 		callbackApp.EXPECT().MakeLog().Return(log).Once()
@@ -123,7 +127,7 @@ func TestAuthServiceProviderRegister(t *testing.T) {
 	})
 
 	t.Run("registers gate singleton", func(t *testing.T) {
-		instance, err := gateCallback(app)
+		instance, err := gateCallback(application)
 
 		assert.NoError(t, err)
 		assert.Implements(t, (*contractsauthaccess.Gate)(nil), instance)
@@ -134,18 +138,9 @@ func TestAuthServiceProviderBoot(t *testing.T) {
 	// This test mutates package-level facades and should not run in parallel.
 	provider := &ServiceProvider{}
 	app := mocksfoundation.NewApplication(t)
-	cache := mockscache.NewCache(t)
 	config := mocksconfig.NewConfig(t)
 	orm := mocksorm.NewOrm(t)
 
-	originCacheFacade := cacheFacade
-	originOrmFacade := ormFacade
-	t.Cleanup(func() {
-		cacheFacade = originCacheFacade
-		ormFacade = originOrmFacade
-	})
-
-	app.EXPECT().MakeCache().Return(cache).Once()
 	app.EXPECT().MakeOrm().Return(orm).Once()
 	app.EXPECT().MakeConfig().Return(config).Once()
 	app.EXPECT().Commands(mock.MatchedBy(func(commands []contractsconsole.Command) bool {
@@ -164,7 +159,96 @@ func TestAuthServiceProviderBoot(t *testing.T) {
 	})).Once()
 
 	provider.Boot(app)
+}
 
-	assert.Same(t, cache, cacheFacade)
-	assert.Same(t, orm, ormFacade)
+func TestAuthServiceProviderFacadesReturnNilWithoutApplication(t *testing.T) {
+	previousApp := registeredApp
+	t.Cleanup(func() {
+		registeredApp = previousApp
+	})
+	registeredApp = nil
+
+	assert.Nil(t, makeCache())
+	assert.Nil(t, makeOrm())
+}
+
+func TestAuthServiceProviderFacadesResolveOnUse(t *testing.T) {
+	mockApp := useApplication(t)
+	firstCache := mockscache.NewCache(t)
+	secondCache := mockscache.NewCache(t)
+	firstOrm := mocksorm.NewOrm(t)
+	secondOrm := mocksorm.NewOrm(t)
+
+	mockApp.EXPECT().MakeCache().Return(firstCache).Once()
+	mockApp.EXPECT().MakeCache().Return(secondCache).Once()
+	mockApp.EXPECT().MakeOrm().Return(firstOrm).Once()
+	mockApp.EXPECT().MakeOrm().Return(secondOrm).Once()
+
+	assert.Same(t, firstCache, makeCache())
+	assert.Same(t, secondCache, makeCache())
+	assert.Same(t, firstOrm, makeOrm())
+	assert.Same(t, secondOrm, makeOrm())
+}
+
+func TestOrmUserProviderKeepsOrmResolvedWhenBuilt(t *testing.T) {
+	mockApp := useApplication(t)
+	firstOrm := mocksorm.NewOrm(t)
+	secondOrm := mocksorm.NewOrm(t)
+	mockApp.EXPECT().MakeOrm().Return(firstOrm).Once()
+	mockApp.EXPECT().MakeOrm().Return(secondOrm).Once()
+
+	first, err := NewOrmUserProvider(Background())
+	assert.NoError(t, err)
+	second, err := NewOrmUserProvider(Background())
+	assert.NoError(t, err)
+
+	assert.Same(t, firstOrm, first.(*OrmUserProvider).orm)
+	assert.Same(t, secondOrm, second.(*OrmUserProvider).orm)
+}
+
+func TestNewJwtGuardKeepsCacheResolvedWhenBuilt(t *testing.T) {
+	mockApp := useApplication(t)
+	firstCache := mockscache.NewCache(t)
+	secondCache := mockscache.NewCache(t)
+	mockApp.EXPECT().MakeCache().Return(firstCache).Once()
+	mockApp.EXPECT().MakeCache().Return(secondCache).Once()
+
+	config := mocksconfig.NewConfig(t)
+	config.EXPECT().GetString("auth.guards.user.secret").Return("a").Twice()
+	config.EXPECT().GetInt("auth.guards.user.ttl").Return(2).Twice()
+	config.EXPECT().GetInt("auth.guards.user.refresh_ttl").Return(2).Twice()
+	previousConfig := configFacade
+	t.Cleanup(func() {
+		configFacade = previousConfig
+	})
+	configFacade = config
+
+	first, err := NewJwtGuard(Background(), "user", nil)
+	assert.NoError(t, err)
+	second, err := NewJwtGuard(Background(), "user", nil)
+	assert.NoError(t, err)
+
+	assert.Same(t, firstCache, first.(*JwtGuard).cache)
+	assert.Same(t, secondCache, second.(*JwtGuard).cache)
+}
+
+func useApplication(t *testing.T) *mocksfoundation.Application {
+	t.Helper()
+
+	previous := registeredApp
+	mockApp := mocksfoundation.NewApplication(t)
+	registeredApp = mockApp
+	t.Cleanup(func() {
+		registeredApp = previous
+	})
+
+	return mockApp
+}
+
+func useFacades(t *testing.T, cache cachecontract.Cache, orm ormcontract.Orm) {
+	t.Helper()
+
+	mockApp := useApplication(t)
+	mockApp.EXPECT().MakeCache().Return(cache).Maybe()
+	mockApp.EXPECT().MakeOrm().Return(orm).Maybe()
 }

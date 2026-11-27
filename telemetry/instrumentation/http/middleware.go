@@ -64,7 +64,8 @@ func (m *lazyMiddleware) Handle(ctx http.Context) {
 }
 
 func newTelemetry(opts ...Option) http.Middleware {
-	if telemetry.ConfigFacade == nil || telemetry.Facade == nil {
+	facade := telemetry.MakeTelemetry()
+	if telemetry.ConfigFacade == nil || facade == nil {
 		return &disabledTelemetry{}
 	}
 
@@ -86,7 +87,7 @@ func newTelemetry(opts ...Option) http.Middleware {
 		cfg.SpanNameFormatter = defaultSpanNameFormatter
 	}
 
-	meter := telemetry.Facade.Meter(instrumentationName)
+	meter := facade.Meter(instrumentationName)
 	durationHist, _ := meter.Float64Histogram(metricRequestDuration, metric.WithUnit(unitSeconds), metric.WithDescription("Duration of HTTP server requests"))
 	requestSizeHist, _ := meter.Int64Histogram(metricRequestBodySize, metric.WithUnit(unitBytes), metric.WithDescription("Size of HTTP server request body"))
 	responseSizeHist, _ := meter.Int64Histogram(metricResponseBodySize, metric.WithUnit(unitBytes), metric.WithDescription("Size of HTTP server response body"))
@@ -101,8 +102,8 @@ func newTelemetry(opts ...Option) http.Middleware {
 	}
 
 	h := &MiddlewareHandler{
-		tracer:           telemetry.Facade.Tracer(instrumentationName),
-		propagator:       telemetry.Facade.Propagator(),
+		tracer:           facade.Tracer(instrumentationName),
+		propagator:       facade.Propagator(),
 		durationHist:     durationHist,
 		requestSizeHist:  requestSizeHist,
 		responseSizeHist: responseSizeHist,

@@ -14,14 +14,30 @@ type Application struct {
 	config    queue.Config
 	cache     cache.Cache
 	db        db.DB
+	resolveDB func() db.DB
 	fake      *Fake
 	jobStorer queue.JobStorer
 	json      foundation.Json
 	log       log.Log
 }
 
-func NewApplication(config queue.Config, cache cache.Cache, db db.DB, job queue.JobStorer, json foundation.Json, log log.Log) *Application {
-	return &Application{
+// Option configures an Application.
+type Option func(*Application)
+
+// WithDBResolver makes the queue resolve its query builder on use, instead of using the query
+// builder it was built with. A nil resolve function is ignored.
+//
+// Queue objects built before the query builder is replaced, such as workers, pending jobs, and
+// database queue drivers, keep the query builder they were built with. Do not use them after its
+// pool closes.
+func WithDBResolver(resolve func() db.DB) Option {
+	return func(r *Application) {
+		r.resolveDB = resolve
+	}
+}
+
+func NewApplication(config queue.Config, cache cache.Cache, db db.DB, job queue.JobStorer, json foundation.Json, log log.Log, options ...Option) *Application {
+	application := &Application{
 		config:    config,
 		cache:     cache,
 		db:        db,
@@ -30,14 +46,27 @@ func NewApplication(config queue.Config, cache cache.Cache, db db.DB, job queue.
 		json:      json,
 		log:       log,
 	}
+	for _, option := range options {
+		option(application)
+	}
+
+	return application
+}
+
+func (r *Application) currentDB() db.DB {
+	if r.resolveDB != nil {
+		return r.resolveDB()
+	}
+
+	return r.db
 }
 
 func (r *Application) Connection(name string) (queue.Driver, error) {
-	return NewDriverCreator(r.config, r.cache, r.db, r.jobStorer, r.json, r.log).Create(name)
+	return NewDriverCreator(r.config, r.cache, r.currentDB(), r.jobStorer, r.json, r.log).Create(name)
 }
 
 func (r *Application) Chain(jobs []queue.ChainJob) queue.PendingJob {
-	pendingJob := NewPendingChainJob(r.config, r.cache, r.db, r.jobStorer, r.json, jobs, r.log)
+	pendingJob := NewPendingChainJob(r.config, r.cache, r.currentDB(), r.jobStorer, r.json, jobs, r.log)
 	if pendingJob != nil {
 		pendingJob.fake = r.fake
 	}
@@ -54,7 +83,7 @@ func (r *Application) GetJobs() []queue.Job {
 }
 
 func (r *Application) Failer() queue.Failer {
-	return NewFailer(r.config, r.db, r, r.json)
+	return NewFailer(r.config, r.currentDB(), r, r.json)
 }
 
 // Fake starts faking the jobs, see queue.Queue for the accepted forms.
@@ -72,7 +101,7 @@ func (r *Application) JobStorer() queue.JobStorer {
 }
 
 func (r *Application) Job(job queue.Job, args ...[]queue.Arg) queue.PendingJob {
-	pendingJob := NewPendingJob(r.config, r.cache, r.db, r.jobStorer, r.json, job, r.log, args...)
+	pendingJob := NewPendingJob(r.config, r.cache, r.currentDB(), r.jobStorer, r.json, job, r.log, args...)
 	pendingJob.fake = r.fake
 
 	return pendingJob
@@ -89,7 +118,7 @@ func (r *Application) Worker(payloads ...queue.Args) queue.Worker {
 	if len(payloads) == 0 {
 		workerQueue := configuredQueue(r.config, defaultConnection)
 
-		worker, err := NewWorker(r.config, r.cache, r.db, r.jobStorer, r.json, r.log, defaultConnection, workerQueue, defaultConcurrent, 1)
+		worker, err := NewWorker(r.config, r.cache, r.currentDB(), r.jobStorer, r.json, r.log, defaultConnection, workerQueue, defaultConcurrent, 1)
 		if err != nil {
 			panic(err)
 		}
@@ -105,7 +134,7 @@ func (r *Application) Worker(payloads ...queue.Args) queue.Worker {
 		payloads[0].Concurrent = r.config.GetInt(fmt.Sprintf("queue.connections.%s.concurrent", payloads[0].Connection), 1)
 	}
 
-	worker, err := NewWorker(r.config, r.cache, r.db, r.jobStorer, r.json, r.log, payloads[0].Connection, payloads[0].Queue, payloads[0].Concurrent, payloads[0].Tries)
+	worker, err := NewWorker(r.config, r.cache, r.currentDB(), r.jobStorer, r.json, r.log, payloads[0].Connection, payloads[0].Queue, payloads[0].Concurrent, payloads[0].Tries)
 	if err != nil {
 		panic(err)
 	}

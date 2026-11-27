@@ -18,6 +18,7 @@ type OrmUserProvider struct {
 }
 
 func NewOrmUserProvider(ctx http.Context) (contractsauth.UserProvider, error) {
+	ormFacade := makeOrm()
 	if ormFacade == nil {
 		return nil, errors.OrmFacadeNotSet.SetModule(errors.ModuleAuth)
 	}
