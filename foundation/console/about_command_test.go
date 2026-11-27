@@ -24,7 +24,7 @@ func (s *AboutCommandTestSuite) SetupTest() {
 }
 
 func (s *AboutCommandTestSuite) TearDownTest() {
-	appInformation = &information{section: make(map[string]int)}
+	FlushAboutState()
 }
 
 func TestAboutCommandTestSuite(t *testing.T) {
@@ -148,6 +148,36 @@ func (s *AboutCommandTestSuite) TestAddToSection() {
 	appInformation.addToSection("Test", []foundation.AboutItem{{Key: "Test Info", Value: "OK"}})
 	s.Equal(appInformation.section, map[string]int{"Test": 0})
 	s.Len(appInformation.details, 1)
+}
+
+func (s *AboutCommandTestSuite) TestFlushAboutState() {
+	tests := []struct {
+		name  string
+		setup func()
+	}{
+		{
+			name: "clears the collected information and the resolvers",
+			setup: func() {
+				appInformation.addToSection("Test", []foundation.AboutItem{{Key: "Key", Value: "Value"}})
+				AddAboutInformation("Custom", foundation.AboutItem{Key: "Key", Value: "Value"})
+			},
+		},
+		{
+			name:  "is safe on empty state",
+			setup: func() {},
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			tt.setup()
+
+			FlushAboutState()
+
+			s.Equal(&information{section: map[string]int{}}, appInformation)
+			s.Nil(customInformationResolvers)
+		})
+	}
 }
 
 func (s *AboutCommandTestSuite) TestInformationRange() {

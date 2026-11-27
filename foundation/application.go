@@ -195,6 +195,12 @@ func (r *Application) Refresh() {
 	// clear Container.instances except the config facade to keep the config values
 	r.Fresh()
 
+	// flush the about information, which no provider owns
+	console.FlushAboutState()
+
+	// flush the package state of the booted providers, in the reverse of the boot order
+	r.flushProviderState()
+
 	// reset provider repository
 	r.providerRepository.Reset()
 
@@ -1055,6 +1061,16 @@ func (r *Application) baseServiceProviders() []foundation.ServiceProvider {
 		&config.ServiceProvider{},
 		&frameworkconsole.ServiceProvider{},
 		&process.ServiceProvider{},
+	}
+}
+
+func (r *Application) flushProviderState() {
+	booted := r.providerRepository.GetBooted()
+
+	for _, provider := range slices.Backward(booted) {
+		if flusher, ok := provider.(foundation.ServiceProviderWithFlushState); ok {
+			flusher.FlushState(r)
+		}
 	}
 }
 

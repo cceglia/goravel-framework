@@ -142,8 +142,19 @@ func (info *information) Range(section string, ranger func(s string, items []fou
 }
 
 // AddAboutInformation Add custom information to the application information.
+//
+// Add entries from a service provider Register or Boot, or from an application builder callback,
+// because those run again when the application is rebuilt. Refresh flushes the application
+// information and the registered entries, so an entry added once outside the build is lost on refresh.
 func AddAboutInformation(section string, items ...foundation.AboutItem) {
 	customInformationResolvers = append(customInformationResolvers, func() {
 		appInformation.addToSection(section, items)
 	})
+}
+
+// FlushAboutState clears the collected application information and the custom information resolvers.
+// Refresh calls it before the providers register again. It is safe on empty state.
+func FlushAboutState() {
+	appInformation = &information{section: make(map[string]int)}
+	customInformationResolvers = nil
 }

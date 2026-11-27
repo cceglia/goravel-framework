@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"html/template"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/stats"
 
+	frameworkconfig "github.com/goravel/framework/config"
 	"github.com/goravel/framework/contracts/binding"
 	"github.com/goravel/framework/contracts/console"
 	"github.com/goravel/framework/contracts/database/schema"
@@ -27,6 +30,7 @@ import (
 	"github.com/goravel/framework/contracts/queue"
 	"github.com/goravel/framework/contracts/schedule"
 	"github.com/goravel/framework/contracts/validation"
+	consolepkg "github.com/goravel/framework/foundation/console"
 	foundationjson "github.com/goravel/framework/foundation/json"
 	mocksconfig "github.com/goravel/framework/mocks/config"
 	mocksconsole "github.com/goravel/framework/mocks/console"
@@ -34,6 +38,7 @@ import (
 	mocksroute "github.com/goravel/framework/mocks/route"
 	mocksview "github.com/goravel/framework/mocks/view"
 	"github.com/goravel/framework/support"
+	"github.com/goravel/framework/support/color"
 )
 
 type ApplicationTestSuite struct {
@@ -1735,4 +1740,182 @@ func (s *ApplicationTestSuite) TestConfigureViews() {
 			tt.setup()
 		})
 	}
+}
+
+const refreshProbeBinding = "refresh.probe"
+
+func (s *ApplicationTestSuite) TestFlushProviderState() {
+	tests := []struct {
+		name  string
+		setup func(first, second *mocksfoundation.ServiceProviderWithFlushState, plain *mocksfoundation.ServiceProvider) []foundation.ServiceProvider
+	}{
+		{
+			name: "flushes the booted providers in reverse boot order",
+			setup: func(first, second *mocksfoundation.ServiceProviderWithFlushState, plain *mocksfoundation.ServiceProvider) []foundation.ServiceProvider {
+				mock.InOrder(
+					second.EXPECT().FlushState(s.app).Return().Once(),
+					first.EXPECT().FlushState(s.app).Return().Once(),
+				)
+
+				return []foundation.ServiceProvider{first, plain, second}
+			},
+		},
+		{
+			name: "does nothing when no provider is booted",
+			setup: func(*mocksfoundation.ServiceProviderWithFlushState, *mocksfoundation.ServiceProviderWithFlushState, *mocksfoundation.ServiceProvider) []foundation.ServiceProvider {
+				return nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			first := mocksfoundation.NewServiceProviderWithFlushState(s.T())
+			second := mocksfoundation.NewServiceProviderWithFlushState(s.T())
+			plain := mocksfoundation.NewServiceProvider(s.T())
+
+			repository := mocksfoundation.NewProviderRepository(s.T())
+			repository.EXPECT().GetBooted().Return(tt.setup(first, second, plain)).Once()
+			s.app.providerRepository = repository
+
+			s.app.flushProviderState()
+		})
+	}
+}
+
+// newRefreshApp builds the application with a real provider repository and the real base providers.
+func (s *ApplicationTestSuite) newRefreshApp(providers ...foundation.ServiceProvider) {
+	previousApp := App
+	previousArgs := os.Args
+	s.T().Cleanup(func() {
+		App = previousApp
+		os.Args = previousArgs
+	})
+	os.Args = []string{"test"}
+	s.T().Setenv("APP_KEY", strings.Repeat("a", 32))
+
+	// Fresh keeps the config instance only when it is already cached.
+	s.app.Instance(binding.Config, frameworkconfig.NewApplication(filepath.Join(s.T().TempDir(), ".env")))
+	s.NotNil(s.app.MakeConfig())
+
+	s.app.providerRepository = NewProviderRepository()
+	s.app.SetJson(foundationjson.New())
+	s.app.RegisterBaseServiceProviders()
+
+	builder := NewApplicationBuilder(s.app)
+	builder.WithProviders(func() []foundation.ServiceProvider { return providers })
+	s.app.builder = builder
+
+	s.app.Singleton(refreshProbeBinding, func(foundation.Application) (any, error) {
+		return new(int), nil
+	})
+	_, err := s.app.Make(refreshProbeBinding)
+	s.NoError(err)
+
+	s.app.Build()
+}
+
+func (s *ApplicationTestSuite) TestRefresh() {
+	tests := []struct {
+		name    string
+		expect  func(flusher *mocksfoundation.ServiceProviderWithFlushState, plain *mocksfoundation.ServiceProvider)
+		refresh func(booted int)
+	}{
+		{
+			name: "flushes the booted providers after dropping the instances and before any provider registers again",
+			expect: func(flusher *mocksfoundation.ServiceProviderWithFlushState, plain *mocksfoundation.ServiceProvider) {
+				flush := flusher.EXPECT().FlushState(s.app).Run(func(foundation.Application) {
+					_, cached := s.app.instances.Load(refreshProbeBinding)
+					s.False(cached)
+				}).Once()
+				mock.InOrder(
+					flush,
+					flusher.EXPECT().Register(s.app).Return().Once(),
+					flusher.EXPECT().Boot(s.app).Return().Once(),
+				)
+				mock.InOrder(
+					flush,
+					plain.EXPECT().Register(s.app).Return().Once(),
+					plain.EXPECT().Boot(s.app).Return().Once(),
+				)
+			},
+			refresh: func(int) { s.app.Refresh() },
+		},
+		{
+			name: "aborts the refresh when a hook panics",
+			expect: func(flusher *mocksfoundation.ServiceProviderWithFlushState, _ *mocksfoundation.ServiceProvider) {
+				flusher.EXPECT().FlushState(s.app).Run(func(foundation.Application) { panic("flush failed") }).Once()
+			},
+			refresh: func(booted int) {
+				s.PanicsWithValue("flush failed", s.app.Refresh)
+				s.Len(s.app.providerRepository.GetBooted(), booted)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			s.SetupTest()
+			flusher := mocksfoundation.NewServiceProviderWithFlushState(s.T())
+			plain := mocksfoundation.NewServiceProvider(s.T())
+
+			// The first build registers and boots both providers, in no fixed order.
+			flusher.EXPECT().Register(s.app).Return().Once()
+			flusher.EXPECT().Boot(s.app).Return().Once()
+			plain.EXPECT().Register(s.app).Return().Once()
+			plain.EXPECT().Boot(s.app).Return().Once()
+			tt.expect(flusher, plain)
+
+			s.newRefreshApp(flusher, plain)
+			tt.refresh(len(s.app.providerRepository.GetBooted()))
+		})
+	}
+}
+
+func (s *ApplicationTestSuite) TestRefresh_FlushesAboutState() {
+	consolepkg.FlushAboutState()
+	s.T().Cleanup(consolepkg.FlushAboutState)
+
+	provider := mocksfoundation.NewServiceProvider(s.T())
+	provider.EXPECT().Register(s.app).Return().Times(2)
+	provider.EXPECT().Boot(s.app).Run(func(app foundation.Application) {
+		app.About("Refresh Test", []foundation.AboutItem{{Key: "Refresh Entry", Value: "present"}})
+	}).Times(2)
+
+	s.newRefreshApp(provider)
+	s.app.Refresh()
+
+	artisan := s.app.MakeArtisan()
+	s.NotNil(artisan)
+
+	output := color.CaptureOutput(func(io.Writer) {
+		s.NoError(artisan.Call("about"))
+	})
+
+	s.Equal(1, strings.Count(output, "Refresh Entry"), output)
+}
+
+func (s *ApplicationTestSuite) TestFresh_DoesNotFlushState() {
+	provider := mocksfoundation.NewServiceProviderWithFlushState(s.T())
+	provider.EXPECT().Register(s.app).Return().Once()
+	provider.EXPECT().Boot(s.app).Return().Once()
+
+	s.newRefreshApp(provider)
+	s.app.Fresh()
+	s.app.Fresh(refreshProbeBinding)
+}
+
+func (s *ApplicationTestSuite) TestRestart_FlushesStateThroughRefresh() {
+	provider := mocksfoundation.NewServiceProviderWithFlushState(s.T())
+	mock.InOrder(
+		provider.EXPECT().Register(s.app).Return().Once(),
+		provider.EXPECT().Boot(s.app).Return().Once(),
+		provider.EXPECT().FlushState(s.app).Return().Once(),
+		provider.EXPECT().Register(s.app).Return().Once(),
+		provider.EXPECT().Boot(s.app).Return().Once(),
+	)
+
+	s.newRefreshApp(provider)
+
+	s.NoError(s.app.Restart())
 }

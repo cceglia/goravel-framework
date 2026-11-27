@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	contractsmail "github.com/goravel/framework/contracts/mail"
 	"github.com/goravel/framework/errors"
@@ -132,4 +133,38 @@ func TestGet_UnsupportedEngine(t *testing.T) {
 	engine, err := Get(mockConfig)
 	assert.ErrorIs(t, err, errors.MailTemplateEngineNotSupported)
 	assert.Nil(t, engine)
+}
+
+func TestFlushEngines(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func()
+	}{
+		{
+			name:  "drops a cached engine so the next Get builds it from the current configuration",
+			setup: func() { engines.Store("html", NewHtml("/old/views")) },
+		},
+		{
+			name:  "is safe on an empty cache",
+			setup: func() {},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			engines = sync.Map{}
+			tt.setup()
+
+			FlushEngines()
+
+			mockConfig := mocksconfig.NewConfig(t)
+			mockConfig.EXPECT().GetString("mail.template.default", "html").Return("html").Once()
+			mockConfig.EXPECT().GetString("mail.template.engines.html.driver", "html").Return("html").Once()
+			mockConfig.EXPECT().GetString("mail.template.engines.html.path", "resources/views/mail").Return("/new/views").Once()
+
+			engine, err := Get(mockConfig)
+			require.NoError(t, err)
+			assert.Equal(t, NewHtml("/new/views"), engine)
+		})
+	}
 }

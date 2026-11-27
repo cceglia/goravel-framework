@@ -62,3 +62,9 @@ func (r *ServiceProvider) Register(app foundation.Application) {
 func (r *ServiceProvider) Boot(app foundation.Application) {
 
 }
+
+// FlushState discards the loaded translation groups. It takes no lock because
+// Refresh runs while no goroutine loads translations.
+func (r *ServiceProvider) FlushState(foundation.Application) {
+	loaded.Clear()
+}

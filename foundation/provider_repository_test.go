@@ -1,6 +1,7 @@
 package foundation
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
@@ -135,6 +136,89 @@ func (s *ProviderRepositoryTestSuite) TestGetBooted() {
 
 	s.True(s.repository.states[keyA].booted)
 	s.False(s.repository.states[keyB].booted)
+}
+
+func (s *ProviderRepositoryTestSuite) TestGetBooted_Order() {
+	var bootLog []foundation.ServiceProvider
+
+	providerA := &bootRecordingProvider[markerA]{log: &bootLog}
+	providerB := &bootRecordingProvider[markerB]{log: &bootLog}
+	providerC := &bootRecordingProvider[markerC]{log: &bootLog}
+
+	boot := func(providers ...foundation.ServiceProvider) {
+		s.repository.Add(providers)
+		s.repository.Register(s.mockApp)
+		s.repository.Boot(s.mockApp)
+	}
+
+	tests := []struct {
+		name   string
+		setup  func()
+		assert func()
+	}{
+		{
+			name:  "returns the providers in the order they booted, on every call",
+			setup: func() { boot(providerA, providerB, providerC) },
+			assert: func() {
+				s.Len(bootLog, 3)
+				for range 20 {
+					s.Equal(bootLog, s.repository.GetBooted())
+				}
+			},
+		},
+		{
+			name:  "returns a copy that survives a change and a reset",
+			setup: func() { boot(providerA, providerB) },
+			assert: func() {
+				expected := slices.Clone(bootLog)
+
+				booted := s.repository.GetBooted()
+				booted[0] = nil
+				s.Equal(expected, s.repository.GetBooted())
+
+				held := s.repository.GetBooted()
+				s.repository.Reset()
+				s.Equal(expected, held)
+			},
+		},
+		{
+			name: "excludes a provider that registered after the boot",
+			setup: func() {
+				boot(providerA)
+				s.repository.Add([]foundation.ServiceProvider{providerB})
+				s.repository.Register(s.mockApp)
+			},
+			assert: func() {
+				s.Equal([]foundation.ServiceProvider{providerA}, s.repository.GetBooted())
+			},
+		},
+		{
+			name:  "is empty after a reset and follows the next boot order",
+			setup: func() { boot(providerA, providerB) },
+			assert: func() {
+				s.Len(s.repository.GetBooted(), 2)
+
+				s.repository.Reset()
+				s.Empty(s.repository.GetBooted())
+
+				bootLog = nil
+				boot(providerB, providerA)
+
+				s.Len(bootLog, 2)
+				s.Equal(bootLog, s.repository.GetBooted())
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			s.SetupTest()
+			bootLog = nil
+
+			tt.setup()
+			tt.assert()
+		})
+	}
 }
 
 func (s *ProviderRepositoryTestSuite) TestLoadFromConfig_Success() {
@@ -683,6 +767,22 @@ func isTopologicalOrder(providers []foundation.ServiceProvider, sorted []foundat
 	}
 
 	return true
+}
+
+type markerA struct{}
+type markerB struct{}
+type markerC struct{}
+
+// bootRecordingProvider appends itself to a shared log when Boot runs. The type
+// parameter gives each instantiation a distinct type name, which the repository
+// uses as the provider key.
+type bootRecordingProvider[T any] struct {
+	log *[]foundation.ServiceProvider
+}
+
+func (r *bootRecordingProvider[T]) Register(_ foundation.Application) {}
+func (r *bootRecordingProvider[T]) Boot(_ foundation.Application) {
+	*r.log = append(*r.log, r)
 }
 
 type AServiceProvider struct{}
