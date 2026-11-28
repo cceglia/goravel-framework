@@ -103,6 +103,17 @@ func (s Stubs) Config() []Config {
 				"Pool configuration",
 			},
 		},
+		// // Caches prepared statements per connection. Disable it when the
+		// // driver or a proxy in front of the database does not support
+		// // prepared statements.
+		// "prepare_stmt": config.Env("DB_PREPARE_STMT", false),
+		{
+			Key:   "prepare_stmt",
+			Value: `config.Env("DB_PREPARE_STMT", false)`,
+			Annotations: []string{
+				"Caches prepared statements per connection. Disable it when the driver or a proxy in front of the database does not support prepared statements.",
+			},
+		},
 		// // Sets the threshold for slow queries in milliseconds, the slow query will be logged.
 		// // Unit: Millisecond
 		// "slow_threshold": 200,

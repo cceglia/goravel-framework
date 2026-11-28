@@ -52,10 +52,13 @@ func BuildGorm(config config.Config, logger logger.Interface, pool database.Pool
 		return c.db, c.instrument, nil
 	}
 
+	prepareStmt := config.GetBool("database.prepare_stmt", false)
+
 	gormConfig := &gorm.Config{
 		DisableAutomaticPing:                     true,
 		DisableForeignKeyConstraintWhenMigrating: true,
 		SkipDefaultTransaction:                   true,
+		PrepareStmt:                              prepareStmt,
 		Logger:                                   logger,
 		NowFunc: func() time.Time {
 			return carbon.Now().StdTime()

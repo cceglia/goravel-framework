@@ -13,6 +13,7 @@ import (
 	"github.com/goravel/framework/contracts/database"
 	"github.com/goravel/framework/contracts/database/db"
 	databasedb "github.com/goravel/framework/database/db"
+	databasegorm "github.com/goravel/framework/database/gorm"
 	"github.com/goravel/framework/errors"
 	mocksconfig "github.com/goravel/framework/mocks/config"
 	"github.com/goravel/framework/support/carbon"
@@ -25,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+	"gorm.io/gorm"
 )
 
 type DBTestSuite struct {
@@ -2613,6 +2615,65 @@ func TestConnection_ConcurrentRace(t *testing.T) {
 
 	if first == nil {
 		t.Fatal("no goroutine obtained a result from Connection")
+	}
+}
+
+// preparedProduct is a local model because Product implements Connection(), which
+// would resolve a second, unmocked connection named "sqlite".
+type preparedProduct struct {
+	Model
+	SoftDeletes
+	Name string
+}
+
+func TestDB_PrepareStmt(t *testing.T) {
+	connection := sqlite.Name + "_prepare_stmt_" + str.Random(6)
+	mockConfig := &mocksconfig.Config{}
+	docker := sqlite.NewDocker(fmt.Sprintf("%s_%s", testDatabase, str.Random(6)))
+	require.NoError(t, docker.Build())
+	defer func() {
+		require.NoError(t, docker.Shutdown())
+	}()
+
+	// Registered before the helper: testify matches the first expectation with calls left,
+	// so this true wins over the helper's false.
+	mockConfig.EXPECT().GetBool("database.prepare_stmt", false).Return(true).Once()
+	mockDatabaseConfig(mockConfig, database.Config{
+		Driver:     sqlite.Name,
+		Database:   docker.Config().Database,
+		Connection: connection,
+	})
+
+	ctx := context.WithValue(context.Background(), testContextKey, "goravel")
+	driver := sqlite.NewSqlite(mockConfig, utils.NewTestLog(), connection)
+	testQuery, err := NewTestQuery(ctx, driver, mockConfig, connection)
+	require.NoError(t, err)
+
+	gormQuery, ok := testQuery.Query().(*databasegorm.Query)
+	require.True(t, ok)
+	instance := gormQuery.Instance()
+	assert.True(t, instance.PrepareStmt)
+	assert.IsType(t, &gorm.PreparedStmtDB{}, instance.ConnPool)
+
+	testQuery.CreateTable(TestTableProducts)
+
+	// Read through the ORM: the DB facade runs SQL through SQLx and bypasses the cache.
+	query := testQuery.Query().Table("products")
+	require.NoError(t, query.Create(&preparedProduct{Name: "prepared"}))
+
+	var created preparedProduct
+	require.NoError(t, query.Where("name", "prepared").First(&created))
+	require.NotZero(t, created.ID)
+
+	want := preparedProduct{Model: Model{ID: created.ID}, Name: "prepared"}
+
+	for range 2 {
+		var got preparedProduct
+		require.NoError(t, query.Where("name", "prepared").First(&got))
+
+		// Timestamps are set by the database, so they are not part of the comparison.
+		got.Timestamps = Timestamps{}
+		assert.Equal(t, want, got)
 	}
 }
 

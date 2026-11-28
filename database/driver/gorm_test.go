@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 	gormtests "gorm.io/gorm/utils/tests"
@@ -33,6 +34,47 @@ func TestBuildGorm_TelemetryPlugin(t *testing.T) {
 
 	_, registered := instance.Plugins[instrumentationdatabase.PluginName]
 	assert.True(t, registered)
+}
+
+func TestBuildGorm_PrepareStmt(t *testing.T) {
+	t.Cleanup(CloseConnections)
+
+	tests := []struct {
+		name             string
+		connection       string
+		prepareStmt      bool
+		expectedConnPool gorm.ConnPool
+	}{
+		{
+			name:             "wraps the pool when enabled",
+			connection:       "prepare_stmt_enabled",
+			prepareStmt:      true,
+			expectedConnPool: &gorm.PreparedStmtDB{},
+		},
+		{
+			name:             "keeps the raw pool when disabled",
+			connection:       "prepare_stmt_disabled",
+			prepareStmt:      false,
+			expectedConnPool: &sql.DB{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockConfig := mocksconfig.NewConfig(t)
+			mockConfig.EXPECT().GetBool("database.prepare_stmt", false).Return(tt.prepareStmt).Once()
+			mockConfig.EXPECT().GetInt("database.pool.max_idle_conns", 10).Return(10).Once()
+			mockConfig.EXPECT().GetInt("database.pool.max_open_conns", 100).Return(100).Once()
+			mockConfig.EXPECT().GetDuration("database.pool.conn_max_idletime", time.Duration(3600)).Return(time.Duration(3600)).Once()
+			mockConfig.EXPECT().GetDuration("database.pool.conn_max_lifetime", time.Duration(3600)).Return(time.Duration(3600)).Once()
+
+			instance, _, err := BuildGorm(mockConfig, gormlogger.Discard, stubPool(), tt.connection, nil)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.prepareStmt, instance.PrepareStmt)
+			assert.IsType(t, tt.expectedConnPool, instance.ConnPool)
+		})
+	}
 }
 
 func TestCloseConnections_ClosesPool(t *testing.T) {
@@ -74,6 +116,7 @@ func TestResetConnections_NilInstrument(t *testing.T) {
 	t.Cleanup(CloseConnections)
 
 	config := mocksconfig.NewConfig(t)
+	config.EXPECT().GetBool("database.prepare_stmt", false).Return(false).Once()
 	config.EXPECT().GetInt("database.pool.max_idle_conns", 10).Return(10).Once()
 	config.EXPECT().GetInt("database.pool.max_open_conns", 100).Return(100).Once()
 	config.EXPECT().GetDuration("database.pool.conn_max_idletime", time.Duration(3600)).Return(time.Duration(3600)).Once()
@@ -120,6 +163,7 @@ func stubPool() database.Pool {
 func stubGormConfig(t *testing.T) *mocksconfig.Config {
 	mockConfig := mocksconfig.NewConfig(t)
 	mockConfig.EXPECT().GetBool("telemetry.instrumentation.database.enabled", true).Return(true).Once()
+	mockConfig.EXPECT().GetBool("database.prepare_stmt", false).Return(false).Once()
 	mockConfig.EXPECT().GetInt("database.pool.max_idle_conns", 10).Return(10).Once()
 	mockConfig.EXPECT().GetInt("database.pool.max_open_conns", 100).Return(100).Once()
 	mockConfig.EXPECT().GetDuration("database.pool.conn_max_idletime", time.Duration(3600)).Return(time.Duration(3600)).Once()

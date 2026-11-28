@@ -27,6 +27,7 @@ func mockDatabaseConfigWithoutWriteAndRead(mockConfig *mocksconfig.Config, confi
 
 	mockConfig.EXPECT().GetBool("app.debug").Return(true)
 	mockConfig.EXPECT().GetInt("database.slow_threshold", 200).Return(200)
+	mockConfig.EXPECT().GetBool("database.prepare_stmt", false).Return(false).Once()
 	mockConfig.EXPECT().GetInt("database.pool.max_idle_conns", 10).Return(10)
 	mockConfig.EXPECT().GetInt("database.pool.max_open_conns", 100).Return(100)
 	mockConfig.EXPECT().GetDuration("database.pool.conn_max_idletime", time.Duration(3600)).Return(time.Duration(3600))
